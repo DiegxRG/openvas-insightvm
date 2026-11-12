@@ -1,0 +1,19 @@
+{
+  "provenance": "Transcribed from controlled Nexus session output; original files remain on server",
+  "tested_commit": "83171ddc42018d1d189d321b697fc5b1f81ce881",
+  "backend_enabled": false,
+  "backend_posts": 0,
+  "unit_tests_passed": 24,
+  "gmp_connection_and_authentication": "passed",
+  "visible_tasks": 47,
+  "full_capture_default_20000_kib": "failed_xml_size_limit",
+  "full_capture_65536_kib": "failed_xml_size_limit",
+  "single_task_live_xml_capture": "completed",
+  "single_task_offline_comparison": "failed_xml_size_limit",
+  "live_comparison_passed": false,
+  "raw_evidence_uploaded": false,
+  "raw_evidence_retrieval_blocker": "SSH server: Not allowed at this time",
+  "mad_env_and_systemd_hashes_unchanged": true,
+  "report_xml_bytes": 7589272,
+  "tasks_xml_bytes": 2793
+}
