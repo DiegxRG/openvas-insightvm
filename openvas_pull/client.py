@@ -64,7 +64,10 @@ class OpenVASClient:
                     raise OpenVASRequestError('GMP cerró una respuesta incompleta', retryable=True)
                 data.extend(chunk)
                 if len(data) > self.settings.report_max_kb * 1024:
-                    raise OpenVASRequestError('Respuesta GMP supera OPENVAS_REPORT_MAX_KB')
+                    raise OpenVASRequestError(
+                        f'Respuesta GMP de al menos {len(data)} bytes supera '
+                        f'OPENVAS_REPORT_MAX_KB={self.settings.report_max_kb}'
+                    )
                 if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
                     raise OpenVASRequestError('Declaraciones XML no admitidas')
                 parser.feed(chunk)

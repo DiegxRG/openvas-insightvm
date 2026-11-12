@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 import math
 import re
+import logging
 
 from openvas_pull.models import normalize_severity
+from openvas_pull.client import OpenVASRequestError
 
 
 def alarm_date(value):
@@ -20,24 +22,39 @@ def alarm_date(value):
 class OpenVASCollector:
     def __init__(self, client):
         self.client = client
+        self.pagination_stats = []
 
-    def pages(self, fetch, tag, page_size):
+    def pages(self, fetch, tag, page_size, context='listado'):
         seen = set()
         total_bytes = 0
+        total_results = 0
         for page in range(self.client.settings.max_pages):
-            root, raw = fetch(page * page_size + 1, page_size)
-            total_bytes += len(raw.encode('utf-8'))
-            if total_bytes > self.client.settings.report_max_kb * 1024:
-                raise ValueError('Listado completo supera OPENVAS_REPORT_MAX_KB')
+            try:
+                root, raw = fetch(page * page_size + 1, page_size)
+            except OpenVASRequestError as exc:
+                raise OpenVASRequestError(f'{context}, pagina={page + 1}: {exc}', retryable=exc.retryable) from exc
+            page_bytes = len(raw.encode('utf-8'))
+            total_bytes += page_bytes
             nodes = root.findall(tag) if tag == 'task' else root.findall('.//' + tag)
+            total_results += len(nodes)
+            stat = {'context': context, 'page': page + 1, 'page_bytes': page_bytes,
+                    'transfer_bytes': total_bytes, 'page_results': len(nodes), 'results_fetched': total_results}
+            self.pagination_stats.append(stat)
+            logging.getLogger(__name__).info('pagination=%s', stat)
+            if page_bytes > self.client.settings.report_max_kb * 1024:
+                raise ValueError(f'{context}, pagina={page + 1}: respuesta de {page_bytes} bytes supera '
+                                 f'OPENVAS_REPORT_MAX_KB={self.client.settings.report_max_kb}')
+            if total_bytes > self.client.settings.pagination_max_kb * 1024:
+                raise ValueError(f'{context}, pagina={page + 1}: trafico acumulado de {total_bytes} bytes supera '
+                                 f'OPENVAS_PAGINATION_MAX_KB={self.client.settings.pagination_max_kb}')
             signature = tuple(node.get('id') or ET_signature(node) for node in nodes)
             if nodes and signature in seen:
-                raise ValueError('GMP repitió una página; captura incompleta')
+                raise ValueError(f'{context}, pagina={page + 1}: GMP repitió una página; captura incompleta')
             seen.add(signature)
             yield nodes, raw, root
             if len(nodes) < page_size:
                 return
-        raise ValueError('Se alcanzó GVM_MAX_PAGES; captura incompleta')
+        raise ValueError(f'{context}: se alcanzó GVM_MAX_PAGES; captura incompleta')
 
     def collect(self, page_size, allowed_severities=None):
         settings = self.client.settings
@@ -45,8 +62,9 @@ class OpenVASCollector:
         findings, assets, raw_reports, diagnostics = {}, {}, {}, []
         tasks = []
         tasks_xml = []
+        self.pagination_stats = []
         with self.client:
-            for nodes, raw, _ in self.pages(self.client.get_tasks, 'task', page_size):
+            for nodes, raw, _ in self.pages(self.client.get_tasks, 'task', page_size, context='tareas'):
                 tasks.extend(nodes)
                 tasks_xml.append(raw)
             for task in tasks:
@@ -60,7 +78,8 @@ class OpenVASCollector:
                 report_pages = []
                 raw_reports[report_id] = report_pages
                 for nodes, raw, root in self.pages(
-                    lambda first, rows: self.client.get_report(report_id, first, rows), 'results/result', page_size
+                    lambda first, rows: self.client.get_report(report_id, first, rows), 'results/result', page_size,
+                    context=f'task_id={task_id} report_id={report_id}'
                 ):
                     report_pages.append(raw)
                     status = root.findtext('.//report/scan_run_status') or report.findtext('scan_run_status')
@@ -91,7 +110,8 @@ class OpenVASCollector:
                         assets[finding['asset_id']] = {'id': finding['asset_id'], 'ip': finding['asset_ip'], 'hostname': finding['asset_hostname']}
         return {'assets': list(assets.values()), 'findings': list(findings.values()),
                 'meta': {'assets_count': len(assets), 'findings_count': len(findings), 'diagnostics': diagnostics,
-                         'allowed_severities': sorted(allowed), 'date_timezone': 'UTC'},
+                         'allowed_severities': sorted(allowed), 'date_timezone': 'UTC',
+                         'pagination': self.pagination_stats},
                 'raw_api': {'tasks': tasks_xml, 'reports': raw_reports}}
 
     def normalize(self, node, scan_date, diagnostics):

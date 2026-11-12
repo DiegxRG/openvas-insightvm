@@ -68,6 +68,7 @@ Si la captura termina, se generan:
 | openvas_prepared_backend.json | JSON final; alarms contiene los objetos que se enviarían individualmente |
 | openvas_filtered.json | Hallazgos normalizados y ocurrencias por puerto/tarea |
 | comparison.json | Resultado de validación, campos y tipos |
+| capture_metrics.json | Tamaños por página/reporte, archivos combinados y error de captura si ocurre |
 | insight_reference_alarm.json | Ejemplo de contrato INSIGHT utilizado |
 | captured_xml/tasks.xml | XML de tareas consultadas |
 | captured_xml/report_0000.xml | XML del primer reporte; puede haber más archivos numerados |
@@ -151,7 +152,7 @@ BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php
 - Se consulta last_report por tarea y se exige scan_run_status=Done en el reporte. No se recorre el historial. Una tarea en ejecución puede tener un reporte anterior completado.
 - GVM_TASK_IDS restringe tareas por IDs separados por comas; vacío incluye todas las visibles. Delimitarlo a MiFibra cuando corresponda.
 - Se paginan tareas y resultados. Una página repetida o alcanzar GVM_MAX_PAGES hace fallar el ciclo antes de enviar datos parciales.
-- No se aplica TOP_N. OPENVAS_REPORT_MAX_KB limita el XML por respuesta y por listado/reporte completo.
+- No se aplica TOP_N. OPENVAS_REPORT_MAX_KB limita cada respuesta y cada XML combinado/exportado a 30720 KiB (30 MiB) por defecto. OPENVAS_PAGINATION_MAX_KB limita por separado el tráfico acumulado de páginas por listado/reporte (65536 KiB, 64 MiB por defecto). Este tráfico puede ser mayor que el archivo combinado debido a metadata repetida por GMP. Todos los límites son en KiB (1024 bytes). Al actualizar una instalación existente, cambiar estos valores también en su .env local, que Git no modifica.
 - Los resultados del mismo equipo y NVT se consolidan. Se prefiere fecha más reciente y, en empate, mayor CVSS; se unen CVEs y conservan ocurrencias localmente.
 - La IP identifica el activo; su reasignación afecta la identidad. No se usa el reporte como identidad del equipo.
 - Fechas sin zona se interpretan como UTC. INSIGHT conserva la hora recibida sin convertirla: confirmar con backend la zona horaria esperada.
@@ -198,3 +199,28 @@ python tools/compare_metadata.py --tasks-xml tasks.xml --report-xml report.xml
 ```
 
 Repetir --report-xml para cada reporte de las tareas. Una comparación estructural aprobada no demuestra conectividad ni aceptación del backend. Los resultados, XML reales, logs, entornos virtuales y secretos quedan excluidos de Git.
+
+## 10. Repetir la validación de Nexus
+
+El informe original está en [docs/validation/2026-11-12-nexus/README.md](docs/validation/2026-11-12-nexus/README.md). Se corrigieron la pérdida de configuración entre captura y comparación y la repetición de metadata al paginar XML locales. La lectura local conserva los XML originales y crea páginas compactas para normalizar los resultados.
+
+Primero reprocesar la captura existente, sin conectarse a OpenVAS ni enviar alarmas:
+
+```bash
+source .venv/bin/activate
+python tools/compare_metadata.py \
+  --tasks-xml validation/metadata_live_single_task/captured_xml/tasks.xml \
+  --report-xml validation/metadata_live_single_task/captured_xml/report_0000.xml \
+  --report-max-kb 30720 \
+  --output validation/metadata_reprocessed
+```
+
+Para los XML locales se usan los límites predeterminados o los indicados por argumentos; no se cargan credenciales del .env. El comando --live carga una sola configuración del .env y la conserva también durante la comparación. Los argumentos --report-max-kb y --pagination-max-kb permiten ajustar límites explícitamente en ambos modos.
+
+Después probar una sola tarea con GVM_TASK_IDS en un .env propio del proyecto, y usar un directorio nuevo de salida:
+
+```bash
+python tools/compare_metadata.py --live --output validation/metadata_live_retest
+```
+
+Revisar comparison.json y capture_metrics.json antes de ampliar a las demás tareas. Las métricas identifican tarea, reporte, página, tamaño de respuesta y tráfico acumulado; el XML combinado tiene su tamaño propio. Si se alcanza un límite, no seguir aumentándolo sin identificar el reporte y comprobar los recursos disponibles. El caso de captura completa de 47 tareas sigue pendiente de validación real; las pruebas sintéticas no lo certifican.

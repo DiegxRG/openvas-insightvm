@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 from dataclasses import replace
+from copy import deepcopy
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,8 +22,11 @@ class XMLFileClient:
         self.settings = settings
         self.tasks_path = tasks_path
         self.reports = {}
+        self._cached_path = None
+        self._cached_root = None
+        self.file_sizes = {}
         for path in report_paths:
-            root = parse_xml(path.read_bytes())
+            root = self.read(path)
             report = root if root.tag == 'report' else root.find('.//report')
             if report is None or not report.get('id'):
                 raise ValueError(f'Report ID missing in {path}')
@@ -31,15 +35,35 @@ class XMLFileClient:
     def __enter__(self): return self
     def __exit__(self, *args): pass
 
+    def read(self, path):
+        if path != self._cached_path:
+            size = path.stat().st_size
+            self.file_sizes[str(path)] = size
+            if size > self.settings.report_max_kb * 1024:
+                raise ValueError(f'XML combinado {path}: {size} bytes supera OPENVAS_REPORT_MAX_KB={self.settings.report_max_kb}')
+            self._cached_root = parse_xml(path.read_bytes())
+            self._cached_path = path
+        return self._cached_root
+
     def page(self, path, first, rows, tag):
-        root = parse_xml(path.read_bytes())
-        for parent in root.iter():
-            children = [child for child in parent if child.tag == tag]
-            selected = children[first - 1:first - 1 + rows]
-            for child in children:
-                if child not in selected:
-                    parent.remove(child)
-        from xml.etree.ElementTree import tostring
+        from xml.etree.ElementTree import Element, SubElement, tostring
+        source = self.read(path)
+        if tag == 'task':
+            root = Element('get_tasks_response', status='200')
+            root.extend(deepcopy(node) for node in source.findall('task')[first - 1:first - 1 + rows])
+        else:
+            # Replay only the selected results and metadata used by the collector.
+            # Large host/NVT summaries outside results must not recur on every page.
+            root = Element('get_reports_response', status='200')
+            original = source if source.tag == 'report' else source.find('.//report')
+            report = SubElement(root, 'report', id=original.get('id', ''))
+            for name in ('scan_run_status', 'scan_end'):
+                value = original.findtext('.//' + name)
+                if value is not None:
+                    SubElement(report, name).text = value
+            container = SubElement(report, 'results')
+            nodes = source.findall('.//results/result')
+            container.extend(deepcopy(node) for node in nodes[first - 1:first - 1 + rows])
         return root, tostring(root, encoding='unicode')
 
     def get_tasks(self, first, rows):
@@ -67,11 +91,36 @@ def insight_expected(project):
     raise ValueError('Expected INSIGHT alarm example not found')
 
 
-def capture_live(env_file, output):
+def capture_live(env_file, output, *, settings=None):
     """Read GMP only. This path never invokes a backend send method."""
-    from xml.etree.ElementTree import Element, SubElement, ElementTree
-    settings = replace(load_settings(env_file), backend_enabled=False)
-    payload = OpenVASCollector(OpenVASClient(settings)).collect(settings.page_size, settings.severities)
+    from xml.etree.ElementTree import Element, SubElement, tostring
+    settings = replace(settings or load_settings(env_file), backend_enabled=False)
+    collector = OpenVASCollector(OpenVASClient(settings))
+    metrics = {'response_and_combined_limit_kib': settings.report_max_kb,
+               'pagination_transfer_limit_kib': settings.pagination_max_kb,
+               'files': [], 'complete': False}
+    output.mkdir(parents=True, exist_ok=True)
+
+    def save_metrics(error=None):
+        metrics['pagination'] = collector.pagination_stats
+        if error is not None:
+            metrics['error'] = str(error)
+        (output / 'capture_metrics.json').write_text(json.dumps(metrics, indent=2) + '\n', encoding='utf-8')
+
+    def write_xml(root, path, context):
+        data = tostring(root, encoding='utf-8', xml_declaration=True)
+        metrics['files'].append({'path': str(path), 'bytes': len(data), 'context': context})
+        if len(data) > settings.report_max_kb * 1024:
+            error = ValueError(f'{context}: XML combinado de {len(data)} bytes supera OPENVAS_REPORT_MAX_KB={settings.report_max_kb}')
+            save_metrics(error)
+            raise error
+        path.write_bytes(data)
+
+    try:
+        payload = collector.collect(settings.page_size, settings.severities)
+    except (OpenVASRequestError, ValueError, OSError) as exc:
+        save_metrics(exc)
+        raise
     directory = output / 'captured_xml'
     directory.mkdir(parents=True, exist_ok=True)
     tasks = Element('get_tasks_response', status='200')
@@ -81,7 +130,7 @@ def capture_live(env_file, output):
             if report is not None and report.get('id') in payload['raw_api']['reports']:
                 tasks.append(task)
     task_path = directory / 'tasks.xml'
-    ElementTree(tasks).write(task_path, encoding='utf-8', xml_declaration=True)
+    write_xml(tasks, task_path, 'tareas')
     report_paths = []
     for index, (report_id, pages) in enumerate(payload['raw_api']['reports'].items()):
         root = parse_xml(pages[0].encode())
@@ -94,16 +143,19 @@ def capture_live(env_file, output):
         for page in pages[1:]:
             container.extend(parse_xml(page.encode()).findall('.//results/result'))
         path = directory / f'report_{index:04d}.xml'
-        ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
+        write_xml(root, path, f'report_id={report_id}')
         report_paths.append(path)
     if not report_paths:
+        save_metrics('No reports available to compare')
         raise ValueError('No reports available to compare')
+    metrics['complete'] = True
+    save_metrics()
     return task_path, report_paths
 
 
-def compare(project, tasks, reports, output, synthetic=False):
+def compare(project, tasks, reports, output, synthetic=False, settings=None):
     expected, reference_path = insight_expected(project)
-    settings = Settings(gvm_host='offline', gvm_port=1, gvm_user='unused', gvm_password='unused')
+    settings = replace(settings, backend_enabled=False) if settings else Settings(gvm_host='offline', gvm_port=1, gvm_user='unused', gvm_password='unused')
     client = XMLFileClient(settings, tasks, reports)
     payload = OpenVASCollector(client).collect(settings.page_size, settings.severities)
     filtered = filter_payload_by_severity(payload, settings.severities)
@@ -136,6 +188,8 @@ def compare(project, tasks, reports, output, synthetic=False):
         'comparison_status': 'passed' if success else ('no_eligible_findings' if not schema else 'failed'),
         'alarms_count': len(prepared['alarms']), 'field_count': len(expected), 'schema_checks': schema,
         'diagnostics': payload['meta']['diagnostics'],
+        'sizes': {'source_files': client.file_sizes, 'replay_pagination': client.settings.pagination_max_kb,
+                  'report_max_kib': settings.report_max_kb, 'pagination': payload['meta']['pagination']},
         'limits': ['Structural compatibility only; scanner connectivity and backend acceptance are not validated.',
                    'OpenVAS dates are UTC; INSIGHT truncates source timestamps without timezone conversion.',
                    'OpenVAS asset_id is namespaced IP and vulnerability_id is NVT OID.'],
@@ -155,20 +209,27 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'validation/metadata')
     parser.add_argument('--live', action='store_true', help='Read GMP and compare without sending backend alarms')
     parser.add_argument('--env-file', default=str(ROOT / '.env'))
+    parser.add_argument('--report-max-kb', type=int, help='XML limit per response and combined file, in KiB')
+    parser.add_argument('--pagination-max-kb', type=int, help='Cumulative transfer budget per task list/report, in KiB')
     args = parser.parse_args()
     if bool(args.tasks_xml) != bool(args.report_xml):
         parser.error('Provide --tasks-xml and --report-xml together')
     if args.live and args.tasks_xml:
         parser.error('--live cannot be combined with local XML')
-    if args.live:
-        try:
-            args.tasks_xml, args.report_xml = capture_live(args.env_file, args.output)
-        except (OpenVASRequestError, ValueError, OSError) as exc:
-            print(f'Live capture failed: {exc}', file=sys.stderr)
-            raise SystemExit(1)
-    synthetic = not args.tasks_xml
-    result = compare(args.insight_project, args.tasks_xml or ROOT / 'tests/fixtures/openvas_tasks.xml',
-                     args.report_xml or [ROOT / 'tests/fixtures/openvas_report.xml'], args.output, synthetic)
+    try:
+        settings = load_settings(args.env_file) if args.live else Settings(gvm_host='offline', gvm_port=1, gvm_user='unused', gvm_password='unused')
+        overrides = {name: value for name, value in [('report_max_kb', args.report_max_kb), ('pagination_max_kb', args.pagination_max_kb)] if value is not None}
+        if any(value <= 0 for value in overrides.values()):
+            parser.error('Size limits must be positive')
+        settings = replace(settings, backend_enabled=False, **overrides)
+        if args.live:
+            args.tasks_xml, args.report_xml = capture_live(args.env_file, args.output, settings=settings)
+        synthetic = not args.tasks_xml
+        result = compare(args.insight_project, args.tasks_xml or ROOT / 'tests/fixtures/openvas_tasks.xml',
+                         args.report_xml or [ROOT / 'tests/fixtures/openvas_report.xml'], args.output, synthetic, settings=settings)
+    except (OpenVASRequestError, ValueError, OSError) as exc:
+        print(f'Metadata validation failed: {exc}', file=sys.stderr)
+        raise SystemExit(1)
     if args.live:
         result['live_connection_validated'] = True
         result['input_kind'] = 'live_gmp_capture'

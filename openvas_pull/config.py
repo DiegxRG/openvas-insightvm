@@ -16,7 +16,8 @@ class Settings:
     gvm_timeout: int = 30
     page_size: int = 250
     max_pages: int = 200
-    report_max_kb: int = 20000
+    report_max_kb: int = 30720
+    pagination_max_kb: int = 65536
     task_ids: tuple = ()
     interval_seconds: int = 600
     max_retries: int = 3
@@ -50,7 +51,8 @@ def load_settings(env_file='.env'):
         gvm_timeout=int(os.getenv('GVM_TIMEOUT', '30')),
         page_size=int(os.getenv('GVM_REPORT_PAGE_SIZE', '250')),
         max_pages=int(os.getenv('GVM_MAX_PAGES', '200')),
-        report_max_kb=int(os.getenv('OPENVAS_REPORT_MAX_KB', '20000')),
+        report_max_kb=int(os.getenv('OPENVAS_REPORT_MAX_KB', '30720')),
+        pagination_max_kb=int(os.getenv('OPENVAS_PAGINATION_MAX_KB', '65536')),
         task_ids=tuple(x.strip() for x in os.getenv('GVM_TASK_IDS', '').split(',') if x.strip()),
         interval_seconds=int(os.getenv('OPENVAS_POLL_SECONDS', '600')),
         max_retries=int(os.getenv('MAX_RETRIES', '3')),
@@ -70,7 +72,7 @@ def load_settings(env_file='.env'):
     )
     if not all((settings.gvm_host, settings.gvm_user, settings.gvm_password)):
         raise ValueError('Faltan GVM_HOST, GVM_USERNAME o GVM_PASSWORD')
-    for field in ('gvm_timeout', 'page_size', 'max_pages', 'report_max_kb', 'interval_seconds', 'max_retries', 'backend_timeout'):
+    for field in ('gvm_timeout', 'page_size', 'max_pages', 'report_max_kb', 'pagination_max_kb', 'interval_seconds', 'max_retries', 'backend_timeout'):
         if getattr(settings, field) <= 0:
             raise ValueError(f'{field} debe ser mayor que cero')
     if not 1 <= settings.gvm_port <= 65535 or settings.retry_backoff_seconds < 0:
