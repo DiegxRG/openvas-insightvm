@@ -1,0 +1,15 @@
+{
+  "finding_id": "282_windows-hotfix-ms03-007",
+  "servidor": "OLT-PRUEBA-01",
+  "ip": "10.0.0.100",
+  "TipoAlarma": "1 - Alarma de seguridad [Critical] - Microsoft CVE-2017-11804",
+  "Local": "Txdxsecure",
+  "fechaalarma": "2026-05-27 16:10:00",
+  "asset_id": "282",
+  "vulnerability_id": "windows-hotfix-ms03-007",
+  "vulnerability_title": "Microsoft CVE-2017-11804",
+  "severity": "Critical",
+  "cvss_score": 9.8,
+  "cves": "CVE-2017-11804",
+  "source": "insightvm"
+}

@@ -1,0 +1,3 @@
+<get_tasks_response status="200">
+  <task id="sample-task"><name>LOCAL SYNTHETIC VALIDATION</name><last_report><report id="sample-report"/></last_report></task>
+</get_tasks_response>

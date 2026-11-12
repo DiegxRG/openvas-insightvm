@@ -1,0 +1,13 @@
+<!-- Synthetic fixture for contract validation; not captured from a scanner. -->
+<get_reports_response status="200" xmlns="urn:gmp">
+ <report id="sample-report"><report id="sample-report">
+  <scan_run_status>Done</scan_run_status><scan_end>2026-11-12T15:00:00Z</scan_end>
+  <results>
+   <result id="critical"><name>Example critical vulnerability</name><host>192.0.2.10<hostname>sample-server</hostname></host><port>443/tcp</port><severity>9.8</severity><creation_time>2026-11-12T14:00:00Z</creation_time><nvt oid="1.3.6.1.4.1.25623.1.0.100001"><refs><ref type="cve" id="CVE-2026-10001"/><ref type="cve" id="CVE-2026-10002"/></refs></nvt></result>
+   <result id="high"><name>Example high vulnerability</name><host>192.0.2.11</host><port>22/tcp</port><severity>7.5</severity><nvt oid="1.3.6.1.4.1.25623.1.0.100002"><ref type="cve" id="CVE-2026-10003"/></nvt></result>
+   <result id="medium"><name>Example medium vulnerability</name><host>192.0.2.10</host><severity>6.9</severity><nvt oid="1.2.3"/></result>
+   <result id="low"><name>Example low vulnerability</name><host>192.0.2.10</host><severity>3.0</severity><nvt oid="1.2.4"/></result>
+   <result id="info"><name>Example informational result</name><host>192.0.2.10</host><severity>0.0</severity><nvt oid="1.2.5"/></result>
+  </results>
+ </report></report>
+</get_reports_response>

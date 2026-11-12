@@ -1,0 +1,200 @@
+# OpenVAS / MiFibra — integración compatible con INSIGHT
+
+Agente Python que consulta reportes existentes de OpenVAS/Greenbone mediante GMP y transforma sus resultados al mismo contrato JSON de alarmas de INSIGHT-MIFIBRA. Descarga metadata, filtra vulnerabilidades altas y críticas y prepara el JSON para MiFibra/Txdxsecure. El envío al backend es opcional y está deshabilitado por defecto.
+
+Solo consulta datos existentes; no inicia escaneos. El comando de comparación nunca envía alarmas, incluso si el archivo de configuración habilita el backend.
+
+## 1. Requisitos de Linux
+
+- Python 3.10 o superior, Git, pip y soporte para venv.
+- Acceso desde el servidor a GMP: configuración prevista `10.208.232.43:41000` por TCP plano.
+- Usuario y contraseña GMP con acceso a las tareas/reportes.
+- Acceso a GitHub y al índice de paquetes. Para un repositorio privado, usar la autenticación GitHub configurada en el servidor.
+
+En Debian/Ubuntu, si faltan herramientas:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git python3 python3-pip python3-venv
+python3 --version
+```
+
+## 2. Primera instalación
+
+Ejecutar como el usuario que operará el agente:
+
+```bash
+git clone --branch main https://github.com/DiegxRG/openvas-insightvm.git
+cd openvas-insightvm
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+chmod 600 .env
+nano .env
+```
+
+El clone ya descarga la versión de main disponible en ese momento. No requiere un pull adicional inmediatamente después.
+
+Completar en .env al menos:
+
+```dotenv
+GVM_TRANSPORT=plain
+GVM_ALLOW_PLAIN_TCP=true
+GVM_HOST=10.208.232.43
+GVM_PORT=41000
+GVM_USERNAME=your-user
+GVM_PASSWORD='your-password'
+ALERT_SEVERITIES=critical,high
+BACKEND_ENABLED=false
+```
+
+Las comillas simples conservan caracteres como $ y & de la contraseña. Python carga el archivo directamente: no ejecutar `source .env`. La API key del proyecto anterior AWS/S3 no se utiliza en este backend. El .env se configura por separado en cada servidor y está excluido de Git.
+
+## 3. Prueba real de metadata, sin enviar al backend
+
+Desde la raíz del repositorio, con el entorno virtual activado:
+
+```bash
+python tools/compare_metadata.py --live --output validation/metadata_live
+```
+
+Este comando consulta GMP, descarga XML, extrae altas y críticas, genera el JSON final y compara sus campos y tipos con un ejemplo de INSIGHT incluido en el repositorio. No requiere clonar INSIGHT-MIFIBRA. No realiza POST al backend.
+
+Si la captura termina, se generan:
+
+| Archivo dentro de validation/metadata_live/ | Contenido |
+|---|---|
+| openvas_prepared_backend.json | JSON final; alarms contiene los objetos que se enviarían individualmente |
+| openvas_filtered.json | Hallazgos normalizados y ocurrencias por puerto/tarea |
+| comparison.json | Resultado de validación, campos y tipos |
+| insight_reference_alarm.json | Ejemplo de contrato INSIGHT utilizado |
+| captured_xml/tasks.xml | XML de tareas consultadas |
+| captured_xml/report_0000.xml | XML del primer reporte; puede haber más archivos numerados |
+
+Para ver el JSON:
+
+```bash
+python -m json.tool validation/metadata_live/openvas_prepared_backend.json
+cat validation/metadata_live/comparison.json
+```
+
+Se espera `passed: true` cuando existen alarmas elegibles y cumplen el contrato. `comparison_status: no_eligible_findings` indica que no hubo alarmas que comparar; revisar diagnósticos, severidades y reportes completados. No equivale por sí solo a falta de conectividad. Código de salida 1 significa captura fallida o comparación no aprobada. Una ejecución fallida puede dejar archivos anteriores: comprobar sus fechas y la salida del comando.
+
+## 4. Actualizar posteriormente
+
+Cuando existan cambios nuevos en GitHub:
+
+```bash
+cd /ruta/donde/clonaron/openvas-insightvm
+git switch main
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python tools/compare_metadata.py --live --output validation/metadata_live
+```
+
+Sustituir la ruta por la ubicación real. El .env local se conserva porque no se versiona. Revisar .env.example por si aparecen variables nuevas. Si pull informa cambios locales o divergencias, revisar antes de continuar. Reiniciar cualquier agente en ejecución para que cargue el código actualizado.
+
+## 5. Ejecutar el agente
+
+Un ciclo de recolección y preparación:
+
+```bash
+python main.py --once
+```
+
+Con `BACKEND_ENABLED=false`, guarda el JSON sin enviar alarmas. Los archivos quedan en OPENVAS_ARTIFACTS_DIR, por defecto:
+
+```text
+runtime/openvas/artifacts/filtered_latest.json
+runtime/openvas/artifacts/prepared_backend_latest.json
+runtime/openvas/artifacts/run_latest.meta.json
+```
+
+Para repetir ciclos cada 600 segundos en primer plano:
+
+```bash
+python main.py
+```
+
+Se detiene con Ctrl+C; cerrar la terminal puede detenerlo. Esta guía cubre instalación y pruebas manuales. La operación permanente requiere configurar un supervisor como systemd.
+
+Después de validar los datos, `BACKEND_ENABLED=true` habilita POST individuales al BACKEND_URL. El comando compare_metadata continúa sin enviar alarmas. main.py --once devuelve código 1 si falla la captura o hay errores de envío/validación. Logs: logs/integration.log.
+
+## 6. Qué obtiene y qué envía
+
+Extrae IP, hostname cuando existe, OID del NVT, título, severidad numérica/CVSS, CVEs y fecha operativa. La evidencia local conserva también tarea, reporte y puerto. Solo acepta altas (7.0 <= CVSS < 9.0) y críticas (9.0 <= CVSS <= 10.0).
+
+El backend recibe estas 13 claves, como INSIGHT:
+
+| Campo | Valor/origen |
+|---|---|
+| finding_id | asset_id + "_" + vulnerability_id |
+| servidor | Hostname; IP como respaldo |
+| ip | Host afectado |
+| TipoAlarma | 1 - Alarma de seguridad [Critical] - título, o High |
+| Local | BACKEND_LOCAL |
+| fechaalarma | creation_time del resultado; respaldo scan_end, en UTC |
+| asset_id | openvas:IP |
+| vulnerability_id | OID del NVT |
+| vulnerability_title | Título del resultado/NVT |
+| severity | High o Critical |
+| cvss_score | Número entre 7.0 y 10.0 |
+| cves | Texto con CVEs separados por comas |
+| source | openvas |
+
+BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php`. Cada objeto de alarms se envía individualmente con Content-Type application/json. Se espera una respuesta JSON con success; el mensaje "Ya existe un registro activo" se contabiliza como conflicto.
+
+## 7. Reglas y límites
+
+- Se consulta last_report por tarea y se exige scan_run_status=Done en el reporte. No se recorre el historial. Una tarea en ejecución puede tener un reporte anterior completado.
+- GVM_TASK_IDS restringe tareas por IDs separados por comas; vacío incluye todas las visibles. Delimitarlo a MiFibra cuando corresponda.
+- Se paginan tareas y resultados. Una página repetida o alcanzar GVM_MAX_PAGES hace fallar el ciclo antes de enviar datos parciales.
+- No se aplica TOP_N. OPENVAS_REPORT_MAX_KB limita el XML por respuesta y por listado/reporte completo.
+- Los resultados del mismo equipo y NVT se consolidan. Se prefiere fecha más reciente y, en empate, mayor CVSS; se unen CVEs y conservan ocurrencias localmente.
+- La IP identifica el activo; su reasignación afecta la identidad. No se usa el reporte como identidad del equipo.
+- Fechas sin zona se interpretan como UTC. INSIGHT conserva la hora recibida sin convertirla: confirmar con backend la zona horaria esperada.
+- Se descartan resultados sin fecha, IP, título, OID o score válido, con diagnóstico.
+- Un reporte completado es una observación histórica; no garantiza vigencia actual. No se inventa un estado vulnerable equivalente a INSIGHT.
+- No hay deduplicación persistente entre ciclos, siguiendo INSIGHT. El backend decide los conflictos activos.
+- Se reintentan errores transitorios de conexión GMP. Los errores de envío se registran y los hallazgos se vuelven a presentar en el ciclo siguiente.
+- PERSIST_RAW_API_DEBUG=true guarda XML de tareas/reportes dentro de raw_api_FECHA.json al ejecutar main.py. Los logs no imprimen autenticación.
+
+Las variables heredadas OPENVAS_TOP_N, OPENVAS_STATE_PATH, META_MAX_KB, OPENVAS_OUTPUT_MODE, OPENVAS_DETAIL_LEVEL y TXDXAI_API_KEY_OPENVAS no se utilizan en este flujo.
+
+## 8. Diagnóstico de red
+
+TimeoutError significa que no se logró abrir TCP: revisar red/VPN, firewall y servicio GMP en la IP/puerto indicados. Todavía no se validaron credenciales. En Linux, si está instalado netcat:
+
+```bash
+nc -vz -w 5 10.208.232.43 41000
+```
+
+ConnectionRefusedError indica rechazo de la conexión; revisar puerto y servicio. PermissionError indica un bloqueo local de permisos o política de red. Un rechazo GMP con código de estado ocurre después de abrir TCP y requiere revisar el servicio/permisos/credenciales según el caso.
+
+La descarga real aún debe validarse desde un servidor con acceso; no se pudo conectar desde el entorno de desarrollo.
+
+## 9. Pruebas sin conexión a OpenVAS
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+python tools/compare_metadata.py
+```
+
+Los XML sintéticos producen una alarma Critical y otra High, descartando Medium/Low/Info. Resultados: validation/metadata/. La referencia incluida procede de la prueba test_backend_prepare_filtered_findings_includes_extended_fields de INSIGHT-MIFIBRA; no es una captura productiva.
+
+Opcionalmente, con el proyecto original disponible, comparar además con su constructor real:
+
+```bash
+python tools/compare_metadata.py --insight-project ../INSIGHT-MIFIBRA
+```
+
+Para procesar XML completos ya exportados:
+
+```bash
+python tools/compare_metadata.py --tasks-xml tasks.xml --report-xml report.xml
+```
+
+Repetir --report-xml para cada reporte de las tareas. Una comparación estructural aprobada no demuestra conectividad ni aceptación del backend. Los resultados, XML reales, logs, entornos virtuales y secretos quedan excluidos de Git.
