@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 import os
 from dotenv import load_dotenv
 
@@ -34,8 +35,9 @@ class Settings:
     backend_url: str = 'https://10.208.232.208/txdxsecure/guarda_alarma.php'
     backend_local: str = 'Mi Fibra'
     backend_alarm_type: str = 'Alarma de seguridad de OpenVAS x TXDXSecure'
-    backend_timeout: int = 30
+    backend_timeout: int = 180
     backend_verify_ssl: bool = True
+    backend_ca_bundle: str | None = None
     delivery_dedup_enabled: bool = True
     delivery_state_path: str = 'runtime/openvas/delivery.sqlite3'
     delivery_batch_size: int = 200
@@ -77,8 +79,9 @@ def load_settings(env_file='.env'):
         backend_url=os.getenv('BACKEND_URL', Settings.backend_url),
         backend_local=os.getenv('BACKEND_LOCAL', 'Mi Fibra'),
         backend_alarm_type=os.getenv('BACKEND_ALARM_TYPE', 'Alarma de seguridad de OpenVAS x TXDXSecure'),
-        backend_timeout=int(os.getenv('BACKEND_TIMEOUT', '30')),
+        backend_timeout=int(os.getenv('BACKEND_TIMEOUT', '180')),
         backend_verify_ssl=flag('BACKEND_TLS_VERIFY', True),
+        backend_ca_bundle=os.getenv('BACKEND_CA_BUNDLE') or None,
         delivery_dedup_enabled=flag('DELIVERY_DEDUP_ENABLED', True),
         delivery_state_path=os.getenv('DELIVERY_STATE_PATH', 'runtime/openvas/delivery.sqlite3'),
         delivery_batch_size=int(os.getenv('DELIVERY_BATCH_SIZE', '200')),
@@ -95,6 +98,8 @@ def load_settings(env_file='.env'):
         raise ValueError('Puerto o backoff inválido')
     if settings.backend_enabled and not settings.backend_url.strip():
         raise ValueError('BACKEND_URL es obligatorio para enviar')
+    if settings.backend_ca_bundle and not Path(settings.backend_ca_bundle).is_file():
+        raise ValueError('BACKEND_CA_BUNDLE no existe o no es un archivo')
     if not settings.delivery_state_path.strip() or settings.delivery_retry_max_seconds < settings.delivery_retry_seconds:
         raise ValueError('Invalid delivery state path or retry limits')
     return settings

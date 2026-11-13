@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from uuid import uuid4
 from typing import Any
 
 import requests
 
 from openvas_pull.config import Settings
+from openvas_pull.snapshots import build_snapshot_id
 
 log = logging.getLogger("openvas_pull.backend")
 
@@ -44,7 +44,7 @@ class BackendAlarmClient:
                 continue
             alarms.append(alarm)
 
-        snapshot_id = snapshot_id or str(uuid4())
+        snapshot_id = snapshot_id or build_snapshot_id()
         payload = {
             "snapshot_id": snapshot_id,
             "request_payload": {"snapshot_id": snapshot_id, "alarms": alarms},
@@ -139,7 +139,7 @@ class BackendAlarmClient:
                 self.settings.backend_url,
                 json=snapshot_payload,
                 timeout=self.settings.backend_timeout,
-                verify=self.settings.backend_verify_ssl,
+                verify=self.settings.backend_ca_bundle or self.settings.backend_verify_ssl,
                 headers={"Content-Type": "application/json"},
             )
         except Exception as exc:
@@ -156,6 +156,10 @@ class BackendAlarmClient:
 
         data["http_status"] = response.status_code
         data["snapshot_id"] = snapshot_payload["snapshot_id"]
+        data.pop('idempotent_replay_confirmed', None)
+        if 200 <= response.status_code < 300 and _confirmed_duplicate_snapshot(data, snapshot_payload):
+            # Preserve the backend's success=false; the outbox may acknowledge this exact replay.
+            data["idempotent_replay_confirmed"] = True
         return data
 
 
@@ -173,4 +177,33 @@ def _display_severity(value: str) -> str:
 
 def _build_finding_id(asset_id: str, vulnerability_id: str) -> str:
     return f"{asset_id}_{vulnerability_id}"
+
+
+def _confirmed_duplicate_snapshot(response, payload):
+    """Only a complete, exact key-by-key duplicate receipt confirms a replay."""
+    if response.get('success') is not False:
+        return False
+    alarms = payload.get('alarms', [])
+    expected = {a.get('finding_id') for a in alarms}
+    data = response.get('data')
+    if not expected or len(expected) != len(alarms) or not isinstance(data, dict):
+        return False
+    sid = payload['snapshot_id']
+    errors = data.get('errores')
+    if data.get('snapshot_id') != sid or data.get('total_alarmas') != len(alarms):
+        return False
+    if not isinstance(errors, list) or len(errors) != len(expected):
+        return False
+    seen = set()
+    for item in errors:
+        if not isinstance(item, dict):
+            return False
+        identity = item.get('finding_id')
+        if not isinstance(identity, str) or identity not in expected or identity in seen:
+            return False
+        message = f"Ya existe un registro con la combinación finding_id='{identity}' y snapshot_id='{sid}'"
+        if item.get('error') != message:
+            return False
+        seen.add(identity)
+    return seen == expected
 

@@ -61,9 +61,10 @@ Conserva SQLite para snapshots inmutables, orden FIFO y reintentos, y compara
 contenido semántico para detectar también cambios de CVSS/CVEs. La adaptación
 está documentada en [DELIVERY.md](DELIVERY.md); el JSON antiguo descargado debe
 regenerarse desde los hallazgos guardados antes de usarlo con este contrato.
-El snapshot_id de OpenVAS es un UUID string para evitar colisiones entre
-capturas rápidas; el cliente INSIGHT usa un timestamp string. Las restricciones
-adicionales del receptor sobre ese valor aún no se han podido inspeccionar.
+El snapshot_id de OpenVAS se corrigió a ISO 8601 UTC con segundos, igual al
+formato exigido por el endpoint en una prueba manual posterior. SQLite mantiene
+un reloj por ámbito para evitar colisiones y conserva el ID en cada reintento.
+Los UUID iniciales fueron rechazados explícitamente por el receptor.
 
 No hay evidencia de una operación de cierre implementada. Una ausencia en el
 último snapshot no demuestra por sí sola resolución: se necesita cobertura de

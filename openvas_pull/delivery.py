@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from uuid import uuid4
+from openvas_pull.snapshots import build_snapshot_id, valid_snapshot_id
 
 
 def canonical(value):
@@ -84,11 +84,15 @@ class Outbox:
             self.db.execute('PRAGMA synchronous=FULL')
             self.db.execute('CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)')
             versions = self.db.execute('SELECT version FROM schema_version').fetchall()
-            if versions and (len(versions) != 1 or versions[0][0] not in (1, 2)):
+            if versions and (len(versions) != 1 or versions[0][0] not in (1, 2, 3)):
                 raise ValueError('Unsupported delivery database schema')
             if versions and versions[0][0] == 1:
                 if self.db.execute("SELECT count(*) FROM events WHERE status='pending'").fetchone()[0]:
                     raise ValueError('Legacy per-alarm pending deliveries exist; migration blocked. Preserve database and reconcile before snapshot activation; see docs/DELIVERY.md')
+            if versions and versions[0][0] == 2:
+                pending = self.db.execute("SELECT snapshot_id FROM snapshot_events WHERE status='pending'").fetchall()
+                if any(not valid_snapshot_id(row[0]) for row in pending):
+                    raise ValueError('Pending legacy UUID snapshots exist; migration blocked. Preserve their payloads and reconcile IDs before sending; see docs/DELIVERY.md')
             # Legacy v1 tables are preserved for audit; they are never posted as snapshots.
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS snapshot_checkpoints(
@@ -101,10 +105,14 @@ class Outbox:
                     next_attempt REAL NOT NULL DEFAULT 0, created_at REAL NOT NULL,
                     acked_at REAL, last_error TEXT, UNIQUE(scope,snapshot_id));
                 CREATE INDEX IF NOT EXISTS snapshot_fifo ON snapshot_events(scope,status,id);
+                CREATE TABLE IF NOT EXISTS snapshot_clocks(scope TEXT PRIMARY KEY, last_epoch INTEGER NOT NULL);
+                INSERT OR IGNORE INTO snapshot_clocks
+                    SELECT scope,MAX(CAST(strftime('%s',snapshot_id) AS INTEGER)) FROM snapshot_events
+                    WHERE strftime('%s',snapshot_id) IS NOT NULL GROUP BY scope;
             """)
             with self.db:
                 self.db.execute('DELETE FROM schema_version')
-                self.db.execute('INSERT INTO schema_version VALUES(2)')
+                self.db.execute('INSERT INTO schema_version VALUES(3)')
         except BaseException:
             self.db.close()
             raise
@@ -134,7 +142,10 @@ class Outbox:
                 self.db.execute('UPDATE snapshot_checkpoints SET started_at=? WHERE scope=?', (snapshot_started_at, scope))
                 return {**counts, 'unchanged': 1}
             # New observation => new ID. Retries use the exact stored ID and entire payload.
-            snapshot_id = str(uuid4())
+            clock = self.db.execute('SELECT last_epoch FROM snapshot_clocks WHERE scope=?', (scope,)).fetchone()
+            epoch = max(int(now), clock[0] + 1 if clock else int(now))
+            snapshot_id = build_snapshot_id(epoch)
+            self.db.execute('INSERT INTO snapshot_clocks VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET last_epoch=excluded.last_epoch', (scope, epoch))
             payload = {'snapshot_id': snapshot_id, 'alarms': alarms}
             self.db.execute("""INSERT INTO snapshot_events(scope,snapshot_id,fingerprint,payload,context,created_at)
                 VALUES(?,?,?,?,?,?)""", (scope, snapshot_id, digest, canonical(payload), canonical(findings or []), now))
@@ -188,7 +199,7 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
                       'total_filtered_findings': prepared.get('total_filtered_findings', 0),
                       'prepared_alarms': len(prepared.get('alarms', [])),
                       'validation_errors': prepared.get('validation_errors', 0),
-                      'sent_ok': 0, 'snapshots_sent': 0, 'conflicts': 0,
+                      'sent_ok': 0, 'snapshots_sent': 0, 'replayed_snapshots': 0, 'conflicts': 0,
                       'backend_errors': 0 if complete else 1,
                       'queued': counts, 'attempted': 0, 'details': list(prepared.get('skipped_findings', []))}
             while True:
@@ -201,10 +212,11 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
                 result['attempted'] += 1
                 result['details'].append(response)
                 status = response.get('http_status', 0)
-                if response.get('success') is True and 200 <= status < 300:
+                if (response.get('success') is True or response.get('idempotent_replay_confirmed') is True) and 200 <= status < 300:
                     store.acknowledge(event['id'], time.time())
                     result['sent_ok'] += len(payload['alarms'])
                     result['snapshots_sent'] += 1
+                    result['replayed_snapshots'] += int(response.get('idempotent_replay_confirmed') is True)
                 else:
                     if 'Ya existe un registro activo' in str(response.get('message', '')):
                         result['conflicts'] += 1

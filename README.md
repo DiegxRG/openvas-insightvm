@@ -248,3 +248,5 @@ Para el flujo actual de entrega completa, reintentos, migración SQLite y contro
 ## Cron semanal sin envío
 
 El cron de OpenVAS utiliza el usuario desarrollo-xoc y ejecuta domingos a las 09:00 (America/Lima), como Insight. El wrapper scripts/run_weekly_validation.sh fuerza --once --no-backend y conserva los JSON de revisión. No envía ni reintenta pendientes aunque el .env habilite el backend. Ver [instalación, rutas y alcance de la revisión del receptor](docs/CRON.md).
+
+La [prueba autorizada del endpoint real](docs/validation/2026-11-13-endpoint/README.md) confirmó 1.258 registros y el rechazo de la repetición idéntica por llave compuesta. Se corrigieron IDs ISO UTC, ACK de repetición, timeout y confianza TLS configurable. El cron continúa sin envío. No hay descargas automáticas a la laptop por POST; ver [retención de artefactos](docs/DELIVERY.md).

@@ -354,7 +354,7 @@ def test_legacy_acked_migration_keeps_audit_and_sends_first_full_snapshot(cfg):
     assert client(cfg,calls).send_prepared_alarms(prepared(3))['snapshots_sent']==1
     with sqlite3.connect(cfg.delivery_state_path) as db:
         assert db.execute('SELECT payload FROM events').fetchone()[0]=='audit'
-        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==2
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==3
 
 
 def test_complete_snapshots_100_to_105_to_70_include_all_remaining(cfg):
@@ -383,3 +383,105 @@ def test_snapshot_file_is_exact_wire_envelope(cfg,tmp_path):
     client(cfg,calls).send_prepared_alarms(p)
     paths=persist_cycle_payloads(str(tmp_path/'artifacts'),None,None,p,{})
     assert json.loads(Path(paths['snapshot_request']).read_text(encoding='utf-8'))==calls[0]
+
+
+def test_snapshot_ids_are_iso_utc_and_clock_survives_pruning(cfg,clock):
+    from openvas_pull.snapshots import valid_snapshot_id
+    calls=[]; c=client(replace(cfg,delivery_dedup_enabled=False),calls)
+    c.send_prepared_alarms(prepared())
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        db.execute('DELETE FROM snapshot_events')
+    c.send_prepared_alarms(prepared())
+    assert all(valid_snapshot_id(p['snapshot_id']) for p in calls)
+    assert calls[0]['snapshot_id'] != calls[1]['snapshot_id']
+
+
+def test_pending_uuid_schema2_is_preserved_and_blocks_migration(cfg):
+    from openvas_pull.delivery import Outbox
+    store=Outbox(cfg.delivery_state_path)
+    try:
+        store.enqueue(scope_key(cfg),prepared()['alarms'],[],True,10000,10000)
+        with store.db:
+            store.db.execute('UPDATE schema_version SET version=2')
+            store.db.execute("UPDATE snapshot_events SET snapshot_id='legacy-uuid',payload='original-json'")
+    finally:store.db.close()
+    calls=[]
+    assert client(cfg,calls).send_prepared_alarms(prepared())['backend_errors']==1
+    assert calls==[]
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==2
+        assert db.execute('SELECT payload FROM snapshot_events').fetchone()[0]=='original-json'
+
+
+def test_acknowledged_uuid_schema2_migrates_without_erasing_history(cfg):
+    calls=[]
+    client(cfg,calls).send_prepared_alarms(prepared())
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        db.execute('UPDATE schema_version SET version=2')
+        db.execute("UPDATE snapshot_events SET snapshot_id='legacy-uuid'")
+    assert client(cfg,calls).send_prepared_alarms(prepared())['attempted']==0
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==3
+        assert db.execute('SELECT snapshot_id FROM snapshot_events').fetchone()[0]=='legacy-uuid'
+
+
+def duplicate_reply(payload):
+    return {'success':False,'message':'No se pudo registrar ninguna alarma','data':{
+        'snapshot_id':payload['snapshot_id'],'total_alarmas':len(payload['alarms']),
+        'errores':[{'index':i,'finding_id':a['finding_id'],
+            'error':f"Ya existe un registro con la combinación finding_id='{a['finding_id']}' y snapshot_id='{payload['snapshot_id']}'"}
+            for i,a in enumerate(payload['alarms'])]}}
+
+
+def test_exact_replay_receipt_acknowledges_lost_success_response(cfg,clock):
+    calls=[]
+    def fail(_):raise TimeoutError('response lost after commit')
+    client(cfg,calls,fail).send_prepared_alarms(prepared(3))
+    clock[0]+=2
+    class AlreadyStored:
+        status_code=200
+        def __init__(self,payload):self.payload=payload
+        def json(self):return duplicate_reply(self.payload)
+    result=client(cfg,calls,lambda p:AlreadyStored(p)).send_prepared_alarms(prepared(0),complete_snapshot=False)
+    assert calls[0]==calls[1]
+    assert result['pending_total']==0 and result['replayed_snapshots']==1
+    assert result['details'][0]['success'] is False
+    assert result['details'][0]['idempotent_replay_confirmed'] is True
+
+
+@pytest.mark.parametrize('case',['snapshot','missing','extra','other_error','repeated_key','http500'])
+def test_incomplete_or_unrelated_duplicate_receipts_stay_pending(cfg,case):
+    class Reply:
+        status_code=500 if case=='http500' else 200
+        def __init__(self,payload):self.payload=payload
+        def json(self):
+            data=duplicate_reply(self.payload)
+            if case=='snapshot':data['data']['snapshot_id']='other'
+            if case=='missing':data['data']['errores'].pop()
+            if case=='extra':data['data']['errores'].append(data['data']['errores'][0])
+            if case=='other_error':data['data']['errores'][0]['error']='Database unavailable'
+            if case=='repeated_key':data['data']['errores'][1]=data['data']['errores'][0]
+            return data
+    r=client(cfg,[],lambda p:Reply(p)).send_prepared_alarms(prepared(3))
+    assert r['pending_total']==1 and r['sent_ok']==0 and r['replayed_snapshots']==0
+
+
+def test_backend_uses_explicit_trust_bundle_without_disabling_tls(cfg,tmp_path):
+    trust=tmp_path/'backend.pem';trust.write_text('test trust file; transport mocked')
+    c=BackendAlarmClient(replace(cfg,backend_ca_bundle=str(trust),backend_timeout=180))
+    class OK:
+        status_code=200
+        def json(self):return {'success':True}
+    def post(url,**kwargs):
+        assert kwargs['verify']==str(trust) and kwargs['timeout']==180
+        return OK()
+    c.session.post=post
+    assert c.send_prepared_alarms(prepared())['snapshots_sent']==1
+
+
+def test_backend_cannot_self_assert_replay_without_matching_receipt(cfg):
+    class Bad:
+        status_code=200
+        def json(self):return {'success':False,'idempotent_replay_confirmed':True,'message':'unknown error'}
+    r=client(cfg,[],lambda p:Bad()).send_prepared_alarms(prepared())
+    assert r['pending_total']==1 and r['sent_ok']==0

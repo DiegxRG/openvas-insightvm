@@ -56,11 +56,12 @@ produce tablas visuales vacías; no cierra registros persistidos.
 
 El receptor configurado es `10.208.232.208/txdxsecure/guarda_alarma.php`, distinto
 del servidor SSH `10.208.232.47`. No se encontró PHP/SQL en INSIGHT-MIFIBRA.
-La aceptación del snapshot_id textual UUID, la idempotencia por
-(finding_id,snapshot_id), la atomicidad del snapshot, la separación por origen
-y la semántica de cierres permanecen **sin confirmar**. Se necesita el código
-PHP y el esquema/migraciones de sus tablas para probarlos contra una base
-exclusivamente de pruebas. No se hicieron solicitudes al backend real.
+La revisión inicial fue sin solicitudes reales. Una [prueba manual posterior
+expresamente autorizada](validation/2026-11-13-endpoint/README.md) confirmó la
+recepción de 1.258 alarmas y el rechazo de las mismas llaves repetidas. El
+receptor exige IDs ISO UTC; rechazó UUID. La atomicidad ante fallos parciales,
+la separación por origen y los cierres permanecen sin confirmar. No hubo
+pruebas de cierres ni acceso al PHP o su BD.
 
 El wrapper es intencionalmente de recolección sin envío. Habilitar entrega
 requerirá una modificación explícita del cron/launcher después de validar el

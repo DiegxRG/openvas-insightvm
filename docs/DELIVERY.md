@@ -55,11 +55,14 @@ tareas y severidades, sin contraseñas. SQLite está destinado a un único servi
 no se debe compartir su archivo mediante NFS ni ejecutar réplicas con bases
 independientes para el mismo ámbito.
 
-Cada snapshot recibe un ID UUID textual único, sin depender de la resolución de
-un segundo del reloj. INSIGHT usa un timestamp textual: se conserva la ubicación
-y tipo string de la clave; no se ha comprobado si PHP impone un formato adicional.
+Cada snapshot usa ISO 8601 UTC con resolución de segundos, por ejemplo
+2026-11-13T20:10:00Z. El endpoint real rechazó los UUID en una prueba manual.
+SQLite conserva un reloj lógico por ámbito: si varias observaciones caen en
+el mismo segundo, asigna el siguiente segundo disponible. El reloj sobrevive
+la eliminación del historial confirmado; no se reutilizan IDs por esa poda.
+El ID identifica la captura, no sustituye fechaalarma de cada hallazgo.
 El ID y JSON se guardan antes del POST y son inmutables en todos los reintentos.
-Se exige HTTP 2xx y success=true para confirmar. Conflictos, errores HTTP,
+Se exige HTTP 2xx y success=true para confirmar, o una respuesta de repetición estrictamente verificada. Conflictos, errores HTTP,
 timeouts y respuestas inválidas mantienen el snapshot pendiente con backoff
 exponencial (60 segundos a 3600 por defecto).
 
@@ -87,8 +90,8 @@ drenar pendientes correctamente.
 
 ## Actualización desde la cola anterior
 
-Se mantiene DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3. El esquema 2
-agrega snapshot_events y snapshot_checkpoints. Las tablas de la versión 1 se
+Se mantiene DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3. El esquema 3
+conserva snapshot_events y snapshot_checkpoints, y agrega snapshot_clocks. Las tablas de la versión 1 se
 conservan para auditoría. Si solo hay eventos antiguos confirmados, la migración
 es automática y la siguiente captura completa establece el primer snapshot.
 
@@ -136,3 +139,38 @@ sustituye session.post por un receptor en memoria y escribe summary.json y
 openvas_snapshot_request.json en la carpeta nueva. Nunca usar la base de prueba
 como estado productivo. Resultados de esta entrega en
 [validation/2026-11-13-snapshots/README.md](validation/2026-11-13-snapshots/README.md).
+
+El esquema 2 migra al 3 conservando el historial. Si conserva snapshots UUID
+pendientes, la migración se bloquea sin cambiarlos ni enviarlos: el receptor
+real no acepta ese formato y cambiar un ID pendiente sin reconciliarlo podría
+romper la idempotencia. Las bases de pruebas anteriores no son estado productivo.
+
+## Copias y retención
+
+No se descarga automáticamente ningún archivo a la laptop al enviar. En el
+servidor, los archivos *_latest.json se sobrescriben en cada corrida, no se
+crea una carpeta por POST. PERSIST_RAW_API_DEBUG=false evita XML históricos
+adicionales. SQLite sí guarda snapshots pendientes completos para reintentos,
+y conserva historial confirmado durante DELIVERY_ACK_RETENTION_DAYS (90 días
+por defecto). La poda elimina ese historial confirmado; no borra pendientes
+ni el checkpoint/reloj. Los directorios validation/ se crean explícitamente
+para pruebas manuales y sus evidencias; no los crea el envío normal.
+
+## Respuesta del receptor al repetir un snapshot
+
+La prueba real aceptó 1.258 alarmas. Al repetir exactamente el mismo JSON y ID,
+el receptor respondió HTTP 200, success=false y un error por cada llave ya
+existente (finding_id,snapshot_id). El emisor reconoce ese caso como confirmación
+de reintento únicamente si los 1.258 errores cubren exactamente los IDs enviados,
+sin repetidos ni faltantes, con el mismo snapshot_id, total y texto de llave
+duplicada esperado. No interpreta cualquier conflicto/error como entrega exitosa.
+La respuesta original success=false se conserva; se añade la marca local
+idempotent_replay_confirmed y el contador replayed_snapshots. Esto permite cerrar
+la cola si el receptor guardó todo y se perdió el primer ACK. Un resultado parcial,
+error distinto, snapshot ajeno o HTTP no 2xx permanece pendiente.
+
+BACKEND_TIMEOUT pasa a 180 segundos: la inserción real tardó 35,373 segundos y
+superó el valor anterior de 30. BACKEND_CA_BUNDLE permite indicar un PEM de confianza
+para el certificado privado/autofirmado sin deshabilitar la verificación TLS.
+El certificado observado vence el 30 de marzo de 2027; su autenticidad inicial
+se basó en la conexión al endpoint interno autorizado, no en una CA pública.
