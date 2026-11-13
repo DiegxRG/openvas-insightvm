@@ -54,9 +54,21 @@ class BackendAlarmClient:
 
     def send_filtered_findings(self, filtered_payload: dict[str, Any]) -> dict[str, Any]:
         prepared_payload = self.prepare_filtered_findings(filtered_payload)
-        return self.send_prepared_alarms(prepared_payload)
+        return self.send_prepared_alarms(prepared_payload, findings=filtered_payload.get('findings', []))
 
-    def send_prepared_alarms(self, prepared_payload: dict[str, Any]) -> dict[str, Any]:
+    def send_prepared_alarms(self, prepared_payload: dict[str, Any], *, findings=None, complete_snapshot=False, snapshot_started_at=None) -> dict[str, Any]:
+        if self.settings.backend_enabled and self.settings.delivery_dedup_enabled:
+            from openvas_pull.delivery import deliver
+            try:
+                return deliver(self, prepared_payload, findings=findings, complete_snapshot=complete_snapshot, snapshot_started_at=snapshot_started_at)
+            except Exception as exc:
+                log.exception('Durable delivery failed; no untracked fallback')
+                return {'enabled': True, 'dedup_enabled': True, 'sent_ok': 0, 'conflicts': 0,
+                        'backend_errors': 1, 'validation_errors': prepared_payload.get('validation_errors', 0),
+                        'details': [{'success': False, 'message': str(exc)}]}
+        return self._send_without_dedup(prepared_payload)
+
+    def _send_without_dedup(self, prepared_payload: dict[str, Any]) -> dict[str, Any]:
         alarms = prepared_payload.get("alarms", [])
         if not isinstance(alarms, list):
             alarms = []

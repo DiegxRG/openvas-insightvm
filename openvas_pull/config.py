@@ -36,6 +36,12 @@ class Settings:
     backend_alarm_type: str = '1 - Alarma de seguridad'
     backend_timeout: int = 30
     backend_verify_ssl: bool = True
+    delivery_dedup_enabled: bool = True
+    delivery_state_path: str = 'runtime/openvas/delivery.sqlite3'
+    delivery_batch_size: int = 200
+    delivery_retry_seconds: int = 60
+    delivery_retry_max_seconds: int = 3600
+    delivery_ack_retention_days: int = 90
 
 
 def load_settings(env_file='.env'):
@@ -73,14 +79,22 @@ def load_settings(env_file='.env'):
         backend_alarm_type=os.getenv('BACKEND_ALARM_TYPE', '1 - Alarma de seguridad'),
         backend_timeout=int(os.getenv('BACKEND_TIMEOUT', '30')),
         backend_verify_ssl=flag('BACKEND_TLS_VERIFY', True),
+        delivery_dedup_enabled=flag('DELIVERY_DEDUP_ENABLED', True),
+        delivery_state_path=os.getenv('DELIVERY_STATE_PATH', 'runtime/openvas/delivery.sqlite3'),
+        delivery_batch_size=int(os.getenv('DELIVERY_BATCH_SIZE', '200')),
+        delivery_retry_seconds=int(os.getenv('DELIVERY_RETRY_SECONDS', '60')),
+        delivery_retry_max_seconds=int(os.getenv('DELIVERY_RETRY_MAX_SECONDS', '3600')),
+        delivery_ack_retention_days=int(os.getenv('DELIVERY_ACK_RETENTION_DAYS', '90')),
     )
     if not all((settings.gvm_host, settings.gvm_user, settings.gvm_password)):
         raise ValueError('Faltan GVM_HOST, GVM_USERNAME o GVM_PASSWORD')
-    for field in ('gvm_timeout', 'gvm_request_timeout', 'page_size', 'max_pages', 'report_max_kb', 'pagination_max_kb', 'interval_seconds', 'max_retries', 'backend_timeout'):
+    for field in ('gvm_timeout', 'gvm_request_timeout', 'page_size', 'max_pages', 'report_max_kb', 'pagination_max_kb', 'interval_seconds', 'max_retries', 'backend_timeout', 'delivery_batch_size', 'delivery_retry_seconds', 'delivery_retry_max_seconds', 'delivery_ack_retention_days'):
         if getattr(settings, field) <= 0:
             raise ValueError(f'{field} debe ser mayor que cero')
     if not 1 <= settings.gvm_port <= 65535 or settings.retry_backoff_seconds < 0:
         raise ValueError('Puerto o backoff inválido')
     if settings.backend_enabled and not settings.backend_url.strip():
         raise ValueError('BACKEND_URL es obligatorio para enviar')
+    if not settings.delivery_state_path.strip() or settings.delivery_retry_max_seconds < settings.delivery_retry_seconds:
+        raise ValueError('Invalid delivery state path or retry limits')
     return settings

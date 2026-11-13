@@ -2,6 +2,8 @@
 
 Agente Python que consulta reportes existentes de OpenVAS/Greenbone mediante GMP y transforma sus resultados al mismo contrato JSON de alarmas de INSIGHT-MIFIBRA. Descarga metadata, filtra vulnerabilidades altas y críticas y prepara el JSON para MiFibra/Txdxsecure. El envío al backend es opcional y está deshabilitado por defecto.
 
+La [capa de entrega persistente y antiduplicados](docs/DELIVERY.md) utiliza SQLite local para omitir versiones confirmadas, conservar cambios y reintentar pendientes sin modificar los 13 campos del backend.
+
 Solo consulta datos existentes; no inicia escaneos. El comando de comparación nunca envía alarmas, incluso si el archivo de configuración habilita el backend.
 
 ## 1. Requisitos de Linux
@@ -166,7 +168,7 @@ BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php
 - Fechas sin zona se interpretan como UTC. INSIGHT conserva la hora recibida sin convertirla: confirmar con backend la zona horaria esperada.
 - Se descartan resultados sin fecha, IP, título, OID o score válido, con diagnóstico.
 - Un reporte completado es una observación histórica; no garantiza vigencia actual. No se inventa un estado vulnerable equivalente a INSIGHT.
-- No hay deduplicación persistente entre ciclos, siguiendo INSIGHT. El backend decide los conflictos activos.
+- La entrega usa una cola SQLite persistente: omite versiones ya confirmadas, conserva cambios y reintenta fallos. Ver la sección de antiduplicados; el colector y el JSON final permanecen completos.
 - Se reintentan errores transitorios de conexión GMP. Los errores de envío se registran y los hallazgos se vuelven a presentar en el ciclo siguiente.
 - PERSIST_RAW_API_DEBUG=true guarda XML de tareas/reportes dentro de raw_api_FECHA.json al ejecutar main.py. Los logs no imprimen autenticación.
 

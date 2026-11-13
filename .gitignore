@@ -13,6 +13,10 @@ payloads/
 runtime/
 /validation/
 *.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3.*.lock
 *.pem
 *.key
 *.p12

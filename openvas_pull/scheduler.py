@@ -21,6 +21,7 @@ def run_service(settings: Settings, collector: OpenVASCollector, once: bool = Fa
         cycle += 1
         started = time.monotonic()
         cycle_time = datetime.now(timezone.utc).isoformat()
+        snapshot_started_at = time.time()
         log.info("cycle=%s started_at=%s", cycle, cycle_time)
 
         success = False
@@ -54,8 +55,13 @@ def run_service(settings: Settings, collector: OpenVASCollector, once: bool = Fa
             "prepared_alarms": prepared_backend_payload.get("prepared_alarms_count", 0),
             "validation_errors": prepared_backend_payload.get("validation_errors", 0),
         }
-        if success and settings.backend_enabled:
-            backend_result = backend_client.send_prepared_alarms(prepared_backend_payload)
+        if settings.backend_enabled:
+            backend_result = backend_client.send_prepared_alarms(
+                prepared_backend_payload if success else {'alarms': [], 'validation_errors': 0},
+                findings=filtered_payload.get('findings', []) if success else [],
+                snapshot_started_at=snapshot_started_at,
+                complete_snapshot=success and not raw_payload.get('meta', {}).get('diagnostics')
+                and not prepared_backend_payload.get('validation_errors'))
             log.info(
                 "cycle=%s backend sent_ok=%s conflicts=%s validation_errors=%s backend_errors=%s",
                 cycle,
@@ -100,7 +106,7 @@ def run_service(settings: Settings, collector: OpenVASCollector, once: bool = Fa
             log.info("cycle=%s payload_persistence=disabled", cycle)
 
         if once:
-            return success and not backend_result.get("backend_errors", 0) and not backend_result.get("validation_errors", 0)
+            return success and not backend_result.get("backend_errors", 0) and not backend_result.get("validation_errors", 0) and not backend_result.get('pending_total', 0)
 
         log.info("cycle=%s sleeping interval_seconds=%s", cycle, settings.interval_seconds)
         time.sleep(settings.interval_seconds)

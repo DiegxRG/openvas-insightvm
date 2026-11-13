@@ -8,7 +8,7 @@ from openvas_pull.config import Settings
 
 
 def cfg():
-    return Settings(gvm_host='offline', gvm_port=1, gvm_user='dummy', gvm_password='dummy')
+    return Settings(gvm_host='offline', gvm_port=1, gvm_user='dummy', gvm_password='dummy', delivery_dedup_enabled=False)
 
 
 class Source:

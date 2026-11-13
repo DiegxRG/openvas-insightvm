@@ -7,7 +7,7 @@ from openvas_pull.backend_client import BackendAlarmClient
 
 
 def settings(**kwargs):
-    return Settings(gvm_host='example', gvm_port=41000, gvm_user='user', gvm_password='secret', **kwargs)
+    return Settings(gvm_host='example', gvm_port=41000, gvm_user='user', gvm_password='secret', delivery_dedup_enabled=False, **kwargs)
 
 
 def result(score, rid='r1', port='443/tcp'):
