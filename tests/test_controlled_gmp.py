@@ -53,10 +53,14 @@ def gmp_service(monkeypatch):
                     first = int(re.search(r'first=(\d+)', term).group(1))
                     rows = int(re.search(r'rows=(\d+)', term).group(1))
                     selected = records
-                    if not state['ignore_filter']:
-                        for operator, bound in constraints:
-                            selected = [r for r in selected if (float(ET.fromstring(r).findtext('severity')) > float(bound)
-                                        if operator == '>' else float(ET.fromstring(r).findtext('severity')) < float(bound))]
+                    if not state['ignore_filter'] and constraints:
+                        def matches(record):
+                            score = float(ET.fromstring(record).findtext('severity'))
+                            checks = [score > float(bound) if operator == '>' else score < float(bound)
+                                      for operator, bound in constraints]
+                            # GMP combines repeated expressions with OR unless AND is explicit.
+                            return all(checks) if ' and ' in term else any(checks)
+                        selected = [r for r in selected if matches(r)]
                     results = ''.join(selected[first - 1:first - 1 + rows])
                     answer = '<get_reports_response status="200"><report id="local-report"><report><scan_run_status>Done</scan_run_status><results>' + results + '</results></report></report></get_reports_response>'
                 else:
@@ -116,6 +120,15 @@ def test_server_ignoring_filter_is_rejected(gmp_service):
     state['ignore_filter'] = True
     with pytest.raises(OpenVASRequestError, match='fuera del filtro'):
         OpenVASCollector(OpenVASClient(cfg)).collect(cfg.page_size, cfg.severities)
+
+
+def test_implicit_or_range_is_rejected_like_real_gmp(gmp_service):
+    cfg, _ = gmp_service
+    class ImplicitORClient(OpenVASClient):
+        def get_report(self, report_id, first, rows):
+            return self.request(f'<get_reports report_id="{report_id}" details="1" filter="first={first} rows={rows} severity&gt;6.9 severity&lt;10.1"/>')
+    with pytest.raises(OpenVASRequestError, match='fuera del filtro'):
+        OpenVASCollector(ImplicitORClient(cfg)).collect(cfg.page_size, cfg.severities)
 
 
 @pytest.mark.parametrize('severities,expected', [(('critical',), 50), (('high',), 150)])

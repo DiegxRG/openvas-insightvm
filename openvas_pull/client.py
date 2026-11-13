@@ -121,11 +121,11 @@ class OpenVASClient:
         # GMP scores have one decimal; >6.9 includes 7.0 through 10.0.
         allowed = set(self.settings.severities)
         if allowed == {'critical'}:
-            severity_filter = 'severity>8.9 severity<10.1'
+            severity_filter = 'severity>8.9'
         elif allowed == {'high'}:
-            severity_filter = 'severity>6.9 severity<9.0'
+            severity_filter = 'severity>6.9 and severity<9.0'
         elif allowed == {'critical', 'high'}:
-            severity_filter = 'severity>6.9 severity<10.1'
+            severity_filter = 'severity>6.9'
         else:
             raise ValueError('Solo se admiten severidades high y critical')
         filter_text = f'first={first} rows={rows} sort=uuid {severity_filter} apply_overrides=1 notes=0 overrides=0'

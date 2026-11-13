@@ -17,7 +17,7 @@ transporte descargue un conjunto mayor de resultados que los solicitados.
 
 ## Corrección y fundamento
 
-- Se solicita `severity>6.9 severity<10.1` para High y Critical, usando el filtro
+- Se solicita `severity>6.9` para High y Critical, usando el filtro
   de resultados de `get_reports` con un `report_id`. Para una sola severidad se
   usa el rango correspondiente. Se aplica paginación sobre los resultados que
   coinciden con el filtro, no sobre todos los resultados antes de filtrarlos.
@@ -35,6 +35,14 @@ La [especificación GMP 22.7](https://docs.greenbone.net/API/GMP/gmp-22.7.html#c
 documenta `filter` para resultados, `severity`, `first`, `rows`, `lean` e
 `ignore_pagination`. La versión concreta desplegada en Nexus y su respuesta
 al filtro deben comprobarse en la prueba real posterior.
+
+Corrección tras consultar GMP 22.7 real: el primer commit (9f7301f) usaba dos
+límites sin `and`. GMP los combinó por OR, incluyendo resultados inferiores a
+7.0. El simulador inicial asumía AND incorrectamente. Se corrigieron cliente y
+simulador, y se añadió una regresión que reproduce esa respuesta. La validación
+local estricta detuvo la captura real en la primera página, sin envíos. La
+consulta de hasta 10 resultados confirmó que el límite único devuelve solo
+High/Critical y que `and` explícito funciona para el rango High.
 
 ## Ejecución local
 
