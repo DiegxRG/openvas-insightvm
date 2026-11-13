@@ -118,7 +118,7 @@ PY
 PRUEBA DEL DISPARO DEL CRON (DESDE LA SHELL DE diego.ramos CON SUDO)
 # Si estas dentro de la shell desarrollo-xoc, usa exit una vez para volver.
 sudo systemctl is-active crond
-sudo journalctl -u crond --since '2026-11-15 08:55:00' --no-pager | grep -E 'run_weekly_delivery|run_pending_retries' | tail -n 120
+sudo journalctl -t CROND -t crond --since '2026-11-15 08:55:00' --no-pager | grep -E 'run_weekly_delivery|run_pending_retries' | tail -n 120
 # Ajustar la fecha al domingo realmente revisado. Si journald no conserva esos
 # registros, revisar /var/log/cron y sus rotaciones sin cambiar configuracion.
 
