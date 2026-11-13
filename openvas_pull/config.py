@@ -32,7 +32,7 @@ class Settings:
     persist_raw_api_debug: bool = False
     backend_enabled: bool = False
     backend_url: str = 'https://10.208.232.208/txdxsecure/guarda_alarma.php'
-    backend_local: str = 'Txdxsecure'
+    backend_local: str = 'Mi Fibra'
     backend_alarm_type: str = 'Alarma de seguridad de OpenVAS x TXDXSecure'
     backend_timeout: int = 30
     backend_verify_ssl: bool = True
@@ -75,7 +75,7 @@ def load_settings(env_file='.env'):
         persist_raw_api_debug=flag('PERSIST_RAW_API_DEBUG'),
         backend_enabled=flag('BACKEND_ENABLED'),
         backend_url=os.getenv('BACKEND_URL', Settings.backend_url),
-        backend_local=os.getenv('BACKEND_LOCAL', 'Txdxsecure'),
+        backend_local=os.getenv('BACKEND_LOCAL', 'Mi Fibra'),
         backend_alarm_type=os.getenv('BACKEND_ALARM_TYPE', 'Alarma de seguridad de OpenVAS x TXDXSecure'),
         backend_timeout=int(os.getenv('BACKEND_TIMEOUT', '30')),
         backend_verify_ssl=flag('BACKEND_TLS_VERIFY', True),

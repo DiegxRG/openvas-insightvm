@@ -65,3 +65,7 @@ exclusivamente de pruebas. No se hicieron solicitudes al backend real.
 El wrapper es intencionalmente de recolección sin envío. Habilitar entrega
 requerirá una modificación explícita del cron/launcher después de validar el
 receptor; cambiar solo BACKEND_ENABLED en .env no activará los POST de este cron.
+
+## Identidad del cliente
+
+La revisión de los .env confirmó el mismo endpoint HTTPS para ambos emisores, pero OpenVAS conservaba BACKEND_LOCAL=Txdxsecure mientras Insight usa Mi Fibra. Se corrigió BACKEND_LOCAL=Mi Fibra en OpenVAS y su configuración de ejemplo/default. TipoAlarma y source mantienen identidad OpenVAS. Esto alinea el campo Local sin afirmar cómo lo interpreta internamente el receptor.
