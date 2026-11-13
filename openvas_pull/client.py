@@ -128,7 +128,9 @@ class OpenVASClient:
             severity_filter = 'severity>6.9'
         else:
             raise ValueError('Solo se admiten severidades high y critical')
-        filter_text = f'first={first} rows={rows} sort=uuid {severity_filter} apply_overrides=1 notes=0 overrides=0'
+        # Override GMP's usual min_qod=70 default: the requested scope includes
+        # every High/Critical result, irrespective of detection confidence.
+        filter_text = f'first={first} rows={rows} sort=uuid {severity_filter} min_qod=0 apply_overrides=1 notes=0 overrides=0'
         response = self.request(f'<get_reports report_id={quoteattr(report_id)} details="1" '
                                 f'lean="{int(self.settings.gvm_lean_report)}" ignore_pagination="0" '
                                 f'filter={quoteattr(filter_text)}/>')

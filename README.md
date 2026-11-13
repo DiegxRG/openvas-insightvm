@@ -133,6 +133,8 @@ El filtro se envía a GMP antes de transferir los resultados: para ambas severid
 
 `capture_metrics.json` registra el filtro solicitado, severidades efectivamente recibidas, duración y bytes por página, además de los límites de consulta. Permite distinguir demora de GMP, exceso de metadata y una respuesta que ignore el filtro.
 
+Para obtener todas las altas y críticas se solicita explícitamente `min_qod=0`: se elimina el umbral implícito de calidad de detección (habitualmente 70) del servidor. No hay TOP_N ni límite de número de alarmas. Con `GVM_TASK_IDS` vacío se incluyen todas las tareas visibles para el usuario GMP. Los resultados repetidos por equipo y NVT se consolidan para backend; sus ocurrencias permanecen en `openvas_filtered.json`. El alcance es el último reporte completado por tarea, no todos los reportes históricos.
+
 El backend recibe estas 13 claves, como INSIGHT:
 
 | Campo | Valor/origen |
