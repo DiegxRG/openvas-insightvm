@@ -50,6 +50,10 @@ def persist_cycle_payloads(
     if isinstance(prepared_backend_payload, dict):
         write_json(prepared_backend_path, prepared_backend_payload)
         paths["prepared_backend"] = str(prepared_backend_path)
+        if isinstance(prepared_backend_payload.get("request_payload"), dict):
+            request_path = base / "snapshot_request_latest.json"
+            write_json(request_path, prepared_backend_payload["request_payload"])
+            paths["snapshot_request"] = str(request_path)
 
     write_json(meta_path, run_meta)
     return paths

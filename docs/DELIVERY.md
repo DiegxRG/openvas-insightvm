@@ -1,134 +1,138 @@
-# Entrega persistente y antiduplicados
+# Entrega de snapshots completos con SQLite
 
-## Ubicación y flujo
+## Contrato y comportamiento
 
-La capa está entre el JSON preparado y el POST. No altera el colector, el filtro
-GMP, las ocurrencias ni los 13 campos del contrato MiFibra. El JSON preparado
-sigue conteniendo todas las alarmas para revisión; omitir entregas ya confirmadas
-no significa borrarlas del archivo.
+Se sigue el envoltorio del cliente INSIGHT del servidor, revisado en el commit
+`02cb850`: un POST JSON con exactamente `snapshot_id` y `alarms`. Cada elemento
+mantiene los 13 campos documentados en README; `cves` es una lista JSON. No se
+agregan columnas de SQLite al POST. `source=openvas` y `TipoAlarma` identifica
+OpenVAS mediante BACKEND_ALARM_TYPE. La referencia y sus límites están en
+[REMOTE_INSIGHT_CONTRACT.md](REMOTE_INSIGHT_CONTRACT.md).
 
-1. Recolectar y preparar el snapshot completo.
-2. En una transacción SQLite, registrar las nuevas versiones en una outbox.
-3. Leer pendientes vencidos en lotes de 200, hasta terminar todos los disponibles.
-   El lote pagina la base; no limita el total enviado por corrida.
-4. Enviar cada JSON original fuera de la transacción.
-5. Confirmar solo con HTTP 2xx y `success=true`. Persistir la confirmación antes
-   de continuar. Un reinicio conserva tanto confirmaciones como pendientes.
-6. Un fallo aplica backoff y mantiene la versión. Las versiones de un finding
-   conservan orden FIFO; no se permite que un reintento antiguo sobrescriba un
-   cambio más reciente. Si el colector falla, el scheduler igual drena pendientes.
+| Observación completa | POST |
+|---|---|
+| Primera captura: 100 alarmas | 1 snapshot con 100 |
+| Mismo contenido | Ninguno |
+| 5 nuevas, total 105 | 1 snapshot con las 105 |
+| Cambia CVSS o CVEs de 5 de las 100 | 1 snapshot con las 100 |
+| Quedan 70 de las 100 | 1 snapshot con las 70 |
+| Captura completa sin hallazgos | 1 snapshot con alarms=[] |
+| Misma captura vacía otra vez | Ninguno |
+| Consulta fallida, parcial o con errores de validación | No encolar esa captura; reintentar pendientes anteriores |
 
-## Identidad y cambios
+No se envían diferencias por alarma. Tampoco se inventa una llamada de cierre:
+el receptor debe interpretar los snapshots según su contrato. Un snapshot vacío
+no es una notificación de “sin cambios”. La identidad del origen en snapshots
+vacíos y la reconciliación/cierre del receptor siguen pendientes de revisar en
+PHP; no se afirma que una ausencia cierre automáticamente una alarma.
 
-El namespace separa destino backend, Local, servidor/usuario GMP, tareas y
-severidades configuradas. No contiene credenciales. Dentro de él, finding_id
-identifica equipo/NVT. Cambiar el namespace crea un historial independiente y
-puede requerir reenviar; mantener una configuración coherente por instalación.
+## Comparación de contenido
 
-La huella semántica considera todos los campos enviados excepto fechaalarma,
-normaliza orden y formato de CVEs, y añade puertos, severidades, CVSS y CVEs de
-las ocurrencias como contexto local. Una fecha de observación, UUID de reporte
-o UUID de resultado nuevos por sí solos no provocan reenvío. Cambios técnicos,
-altas nuevas, aumentos o disminuciones de CVSS, CVEs agregados o retirados,
-hostname/título y puertos nuevos sí generan una versión pendiente. La huella y
-el contexto nunca se añaden al POST.
+Se compara una huella del conjunto completo, ordenado por finding_id. Incluye
+los campos de cada alarma salvo fechaalarma; detecta altas, bajas, severidad,
+CVSS, CVEs, hostname, IP, título y demás cambios de contenido. CVEs se normalizan
+como conjunto ordenado y CVSS como número. Cuando se aportan los hallazgos del
+colector, también se comparan puerto, severidad, CVSS y CVEs de las ocurrencias.
+Cambiar solo fecha de observación, UUID de reporte/resultado u orden de listas
+no produce otra entrega. Las ocurrencias completas se conservan localmente;
+el contrato de 13 campos sigue agrupando por activo y NVT.
 
-Cada evento conserva también el snapshot completo del finding como contexto
-local, incluidas sus ocurrencias. Así los detalles de cambios pendientes no
-dependen de que filtered_latest.json todavía contenga una versión anterior.
+Un finding_id repetido en una misma captura se rechaza como ambiguo. Una captura
+anterior a la última observada no revierte el checkpoint. El scheduler comprueba
+que no haya diagnósticos del colector ni errores de preparación antes de
+considerar completa la captura. No se alteran el filtro GMP ni la paginación.
 
-Se conservan también transiciones A → B → A: no se deduplica contra cualquier
-versión histórica, sino contra la última versión observada del finding.
+## Persistencia, orden y reintentos
 
-Solo una captura completa sin diagnósticos ni errores de validación puede
-marcar una identidad ausente localmente. Si reaparece, se crea una nueva
-generación y se envía aunque su contenido coincida. Eso no envía cierres al
-backend: el contrato actual no los define. Capturas parciales no infieren
-desapariciones. Marcas de inicio por snapshot y finding impiden que una captura
-más antigua revierta una observación nueva en procesos concurrentes.
+SQLite usa WAL y synchronous=FULL. Una transacción guarda el snapshot completo,
+su contexto de hallazgos y el nuevo checkpoint de contenido. Se compara contra
+la última observación encolada, incluso si todavía está pendiente: una secuencia
+A → B → A conserva los tres snapshots en orden.
 
-## Almacenamiento y concurrencia
+Un bloqueo del sistema operativo admite un solo emisor por ámbito y se libera
+si muere el proceso. El ámbito incluye receptor, Local, servidor/usuario GMP,
+tareas y severidades, sin contraseñas. SQLite está destinado a un único servidor;
+no se debe compartir su archivo mediante NFS ni ejecutar réplicas con bases
+independientes para el mismo ámbito.
 
-SQLite estándar de Python, WAL, synchronous=FULL, índices por scope/estado y por
-finding. Transacciones cortas, sin HTTP dentro de ellas. Un lock del sistema
-operativo permite un solo emisor por namespace; se libera si el proceso muere.
-Un segundo emisor informa error y no hace un envío paralelo ni un fallback sin
-estado. Una base corrupta/inaccesible también detiene la entrega, sin borrar ni
-reinicializar silenciosamente el estado.
+Cada snapshot recibe un ID UUID textual único, sin depender de la resolución de
+un segundo del reloj. INSIGHT usa un timestamp textual: se conserva la ubicación
+y tipo string de la clave; no se ha comprobado si PHP impone un formato adicional.
+El ID y JSON se guardan antes del POST y son inmutables en todos los reintentos.
+Se exige HTTP 2xx y success=true para confirmar. Conflictos, errores HTTP,
+timeouts y respuestas inválidas mantienen el snapshot pendiente con backoff
+exponencial (60 segundos a 3600 por defecto).
 
-Esta estructura está pensada para un servidor con almacenamiento local. SQLite
-WAL [requiere el mismo host y no es apropiado para un filesystem de red](https://sqlite.org/wal.html).
-Para varios nodos emisores se necesitaría estado/cola compartidos y coordinación
-distribuida. No colocar esta base en NFS ni copiar una base distinta por proceso.
+La cola es FIFO por ámbito completo. Si falla el primero, ninguno posterior
+puede adelantarlo. Cada POST incluye todo el snapshot, sin dividir sus alarmas
+en lotes. DELIVERY_BATCH_SIZE se conserva por compatibilidad de configuración;
+no recorta el contenido ni permite adelantar snapshots.
 
-Solo se purga el historial de eventos confirmados de más de 90 días. Se
-conservan los checkpoints de identidad para que no reaparezcan duplicados por
-purga y nunca se eliminan pendientes automáticamente. Respaldar con la API
-backup de SQLite, o con el agente parado incluyendo los archivos WAL asociados;
-no copiar únicamente un .sqlite3 abierto y asumir que contiene todo.
+Solo se elimina historial confirmado después de DELIVERY_ACK_RETENTION_DAYS
+(90 por defecto); pendientes y checkpoint no expiran. Un timeout después de que
+el receptor haya guardado datos puede provocar reenvío: HTTP y SQLite no tienen
+una transacción compartida. La idempotencia final depende de que el backend use
+el mismo snapshot_id y su llave compuesta; no se promete entrega exactamente una
+vez sin cooperación del receptor.
 
-## Confirmaciones y límites del backend
+BACKEND_ENABLED=false impide POST y no crea ni cambia la base. Con
+DELIVERY_DEDUP_ENABLED=false se conserva SQLite y FIFO, pero cada observación
+completa encola un snapshot aunque el contenido sea igual. No hay fallback de
+POST individual si SQLite falla.
 
-Un conflicto `Ya existe un registro activo` NO confirma que el backend guardó
-esa versión ni sus cambios. Permanece pendiente y aparece como conflicto; no se
-descarta. Un backend de solo inserción que rechace actualizaciones necesita
-soportar actualización/upsert por finding_id para aceptar cambios. Esta capa
-no inventa endpoints ni transforma el JSON para ocultar ese problema.
+Los contadores attempted, snapshots_sent y pending_total cuentan snapshots;
+sent_ok suma las alarmas de los snapshots confirmados (puede ser 0 al confirmar
+un snapshot vacío). Un ciclo parcial se marca con backend_errors aunque pueda
+drenar pendientes correctamente.
 
-La semántica es al menos una vez ante fallos ambiguos. HTTP y SQLite no pueden
-confirmarse como una sola transacción: si el backend guardó pero el proceso cae
-antes de registrar el ACK, se reintenta. Evitar también ese duplicado requiere
-idempotencia/unicidad del backend. En las corridas normales confirmadas no se
-realizan POST repetidos.
+## Actualización desde la cola anterior
 
-## Configuración y operación
+Se mantiene DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3. El esquema 2
+agrega snapshot_events y snapshot_checkpoints. Las tablas de la versión 1 se
+conservan para auditoría. Si solo hay eventos antiguos confirmados, la migración
+es automática y la siguiente captura completa establece el primer snapshot.
 
-```dotenv
-BACKEND_ENABLED=false
-DELIVERY_DEDUP_ENABLED=true
-DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3
-DELIVERY_BATCH_SIZE=200
-DELIVERY_RETRY_SECONDS=60
-DELIVERY_RETRY_MAX_SECONDS=3600
-DELIVERY_ACK_RETENTION_DAYS=90
-```
+Si hay eventos individuales pendientes de la versión 1, la migración se bloquea
+sin enviarlos, borrarlos ni marcarlos confirmados. Esos registros no permiten
+reconstruir por sí solos un snapshot histórico completo. Conservar la base y sus
+archivos WAL/SHM y reconciliar esas entregas con el receptor antes de cambiar de
+modo. No borrar el archivo ni editar estados a ciegas para eludir el bloqueo.
+Una base corrupta o de versión desconocida también bloquea los POST.
 
-El backend deshabilitado y el comparador de metadata no crean ni confirman
-estado de entrega. Los JSON descargados no se importan como si ya estuvieran
-enviados. La primera activación real registra/envía todas las alarmas actuales.
-Las pruebas usan bases separadas y un backend ficticio, nunca la base productiva.
-
-La base y sus archivos auxiliares están excluidos de Git. No borrarlos al hacer
-git pull ni al desplegar: perder la base provoca reenvíos. El .env se conserva;
-las nuevas opciones tienen valores predeterminados y no requieren nuevos pip.
-
-```bash
-# Estadísticas: no necesita conectarse a GMP ni al backend.
-python tools/delivery_state.py stats
-# Adelantar el siguiente reintento de un finding pendiente específico:
-python tools/delivery_state.py retry --scope HASH --finding-id ID
-# Forzar que la próxima observación se considere reaparición:
-python tools/delivery_state.py resend-next-observation --scope HASH --finding-id ID
-```
-
-Los hashes de scope salen en stats. Estos comandos no hacen POST. El último es
-útil, por ejemplo, tras un cierre manual en backend que el colector no conoce.
-Los errores de envío y pending_total aparecen en run_latest.meta.json. Con
-pendientes, main.py --once devuelve código 1 aunque la recolección haya sido
-correcta. No requiere esperar dormido dentro de una petición para reintentar.
-
-## Prueba controlada con JSON guardado
+## Inspección y controles locales
 
 ```bash
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 stats
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 retry --scope SCOPE
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 retry --scope SCOPE --snapshot-id ID
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 force-next-snapshot --scope SCOPE
+```
+
+Estos comandos no conectan a GMP ni al backend. retry adelanta la fecha de
+reintento, sin cambiar ID/payload ni saltarse FIFO. force-next-snapshot marca el
+checkpoint para volver a encolar la próxima captura completa con otro ID.
+BACKEND_ENABLED sigue controlando cualquier envío posterior.
+
+## Artefactos y prueba controlada
+
+main.py guarda el envoltorio listo en
+runtime/openvas/artifacts/snapshot_request_latest.json. prepared_backend_latest.json
+incluye request_payload y metadatos de preparación. Si la corrida no se envía,
+el ID del artefacto es una propuesta, no una confirmación del receptor.
+compare_metadata.py guarda openvas_snapshot_request.json y nunca hace POST.
+
+Para probar los JSON guardados sin consultar GMP ni usar HTTP real:
+
+```bash
+python -m pytest -q
 python tools/test_delivery_controlled.py \
-  --prepared validation/CAPTURA/openvas_prepared_backend.json \
-  --findings validation/CAPTURA/openvas_filtered.json \
-  --output validation/PRUEBA_NUEVA
+  --prepared /ruta/openvas_prepared_backend.json \
+  --findings /ruta/openvas_filtered.json \
+  --output validation/snapshot_test_nuevo
 ```
 
-El directorio de salida debe ser nuevo. El transporte es un stub en memoria a
-un destino .invalid; no se llama al backend real ni a GMP. Comprueba primera
-entrega, replay con nuevo cliente sobre la misma SQLite, crítica nueva, cambios
-de CVEs/título/puerto, repetición de cambios y reaparición. La suite pytest añade
-timeouts, conflictos, orden de versiones, rollback, corrupción, concurrencia,
-muerte de proceso y drenaje cuando falla el colector.
+La prueba regenera el contrato desde todos los hallazgos, usa una base aislada,
+sustituye session.post por un receptor en memoria y escribe summary.json y
+openvas_snapshot_request.json en la carpeta nueva. Nunca usar la base de prueba
+como estado productivo. Resultados de esta entrega en
+[validation/2026-11-13-snapshots/README.md](validation/2026-11-13-snapshots/README.md).

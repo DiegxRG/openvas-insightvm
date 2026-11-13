@@ -40,7 +40,7 @@ def test_collection_filters_and_consolidates():
     alarm = client.prepare_filtered_findings(payload)['alarms'][0]
     assert set(alarm) == {'finding_id', 'servidor', 'ip', 'TipoAlarma', 'Local', 'fechaalarma', 'asset_id', 'vulnerability_id', 'vulnerability_title', 'severity', 'cvss_score', 'cves', 'source'}
     assert alarm['source'] == 'openvas'
-    assert alarm['cves'] == 'CVE-2026-1234'
+    assert alarm['cves'] == ['CVE-2026-1234']
     assert alarm['finding_id'] == 'openvas:10.0.0.1_1.2.3'
 
 
@@ -63,8 +63,8 @@ def test_disabled_backend_never_posts():
     assert client.send_filtered_findings(OpenVASCollector(FakeClient()).collect(250))['skipped'] is True
 
 
-def test_backend_posts_each_alarm_and_handles_conflict():
-    client = BackendAlarmClient(settings(backend_enabled=True))
+def test_backend_posts_full_snapshot_and_handles_conflict(tmp_path):
+    client = BackendAlarmClient(settings(backend_enabled=True, delivery_state_path=str(tmp_path/'state.sqlite3')))
     calls = []
     class Response:
         status_code = 200
@@ -75,7 +75,7 @@ def test_backend_posts_each_alarm_and_handles_conflict():
     client.session.post = post
     payload = OpenVASCollector(FakeClient()).collect(250)
     assert client.send_filtered_findings(payload)['conflicts'] == 1
-    assert len(calls) == 1 and 'alarms' not in calls[0]
+    assert len(calls) == 1 and set(calls[0]) == {'snapshot_id', 'alarms'}
 
 
 def test_repeated_page_fails_instead_of_sending_partial_data():
@@ -141,7 +141,7 @@ def test_capture_exports_reusable_xml_and_forces_backend_disabled(tmp_path, monk
     from pathlib import Path
     from tools import compare_metadata as comparison
     fixtures = Path(__file__).parent / 'fixtures'
-    monkeypatch.setattr(comparison, 'load_settings', lambda _: settings(backend_enabled=True))
+    monkeypatch.setattr(comparison, 'load_settings', lambda _: settings(backend_enabled=True, delivery_state_path=str(tmp_path/'state.sqlite3')))
     def client_factory(cfg):
         assert cfg.backend_enabled is False
         return comparison.XMLFileClient(cfg, fixtures / 'openvas_tasks.xml', [fixtures / 'openvas_report.xml'])

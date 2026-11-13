@@ -50,18 +50,18 @@ def test_later_high_does_not_hide_critical_and_occurrences_keep_evidence(reverse
     assert len(alarm) == 13
 
 
-def test_group_identity_is_stable_on_replay_but_client_resends_without_backend_dedup():
+def test_group_identity_is_stable_on_replay_but_client_resends_without_backend_dedup(tmp_path):
     payload = OpenVASCollector(Source()).collect(250)
     second = OpenVASCollector(Source()).collect(250)
-    client = BackendAlarmClient(replace(cfg(), backend_enabled=True))
-    prepared = client.prepare_filtered_findings(payload)
-    assert prepared == client.prepare_filtered_findings(second)
+    client = BackendAlarmClient(replace(cfg(), backend_enabled=True, delivery_state_path=str(tmp_path/'state.sqlite3')))
+    prepared = client.prepare_filtered_findings(payload, snapshot_id='fixed')
+    assert prepared == client.prepare_filtered_findings(second, snapshot_id='fixed')
     calls = []
     class Response:
         status_code = 200
         def json(self): return {'success': True}
     def post(url, **kwargs):
-        calls.append(kwargs['json']['finding_id'])
+        calls.append(kwargs['json']['alarms'][0]['finding_id'])
         return Response()
     client.session.post = post
     assert client.send_prepared_alarms(prepared)['sent_ok'] == 1
@@ -69,8 +69,8 @@ def test_group_identity_is_stable_on_replay_but_client_resends_without_backend_d
     assert calls[0] == calls[1]
 
 
-def test_client_classifies_backend_conflict_without_claiming_local_suppression():
-    client = BackendAlarmClient(replace(cfg(), backend_enabled=True))
+def test_client_classifies_backend_conflict_without_claiming_local_suppression(tmp_path):
+    client = BackendAlarmClient(replace(cfg(), backend_enabled=True, delivery_state_path=str(tmp_path/'state.sqlite3')))
     prepared = client.prepare_filtered_findings(OpenVASCollector(Source()).collect(250))
     seen = set()
     class Response:
@@ -79,7 +79,7 @@ def test_client_classifies_backend_conflict_without_claiming_local_suppression()
         def json(self):
             return {'success': False, 'message': 'Ya existe un registro activo'} if self.duplicate else {'success': True}
     def post(url, **kwargs):
-        identity = kwargs['json']['finding_id']
+        identity = kwargs['json']['alarms'][0]['finding_id']
         response = Response(identity in seen)
         seen.add(identity)
         return response

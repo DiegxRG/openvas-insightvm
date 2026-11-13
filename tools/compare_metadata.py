@@ -158,7 +158,8 @@ def capture_live(env_file, output, *, settings=None):
 
 
 def compare(project, tasks, reports, output, synthetic=False, settings=None):
-    expected, reference_path = insight_expected(project)
+    expected = json.loads((ROOT/'tests/fixtures/insight_snapshot_reference.json').read_text(encoding='utf-8'))['alarms'][0]
+    reference_path = 'tests/fixtures/insight_snapshot_reference.json'
     settings = replace(settings, backend_enabled=False) if settings else Settings(gvm_host='offline', gvm_port=1, gvm_user='unused', gvm_password='unused')
     client = XMLFileClient(settings, tasks, reports)
     payload = OpenVASCollector(client).collect(settings.page_size, settings.severities)
@@ -168,8 +169,18 @@ def compare(project, tasks, reports, output, synthetic=False, settings=None):
     if project is not None:
         sys.path.insert(0, str(project))
         insight_backend = importlib.import_module('insightvm_pull.backend_client').BackendAlarmClient(settings)
-        # Optional deeper comparison when the original project is available.
-        builder_matches = prepared == insight_backend.prepare_filtered_findings(filtered)
+        # Pin the ID; tool identity/label naturally differ between scanners.
+        import inspect
+        method = insight_backend.prepare_filtered_findings
+        if 'snapshot_id' not in inspect.signature(method).parameters:
+            builder_matches = False  # Older local per-alarm client is not the server contract.
+        else:
+            reference = method(filtered, snapshot_id=prepared['snapshot_id'])
+            reference_alarms = reference.get('request_payload', {}).get('alarms', [])
+            builder_matches = len(reference_alarms) == len(prepared['alarms']) and all(
+                {k:v for k,v in a.items() if k not in ('source','TipoAlarma')} ==
+                {k:v for k,v in b.items() if k not in ('source','TipoAlarma')}
+                for a,b in zip(reference_alarms, prepared['alarms']))
     schema = []
     for alarm in prepared['alarms']:
         schema.append({
@@ -187,9 +198,10 @@ def compare(project, tasks, reports, output, synthetic=False, settings=None):
     comparison = {
         'passed': success, 'input_kind': 'synthetic_fixture' if synthetic else 'user_supplied_xml',
         'live_connection_validated': False, 'backend_posts': 0,
-        'reference': reference_path, 'reference_kind': 'INSIGHT test example' if project is None else 'INSIGHT test example and actual backend builder',
+        'reference': reference_path, 'reference_kind': 'Server INSIGHT snapshot contract' if project is None else 'Server snapshot contract and supplied builder',
         'same_prepared_payload_as_insight_builder': builder_matches,
         'comparison_status': 'passed' if success else ('no_eligible_findings' if not schema else 'failed'),
+        'snapshot_envelope_fields': sorted(prepared['request_payload']), 'cves_type': 'list',
         'alarms_count': len(prepared['alarms']), 'field_count': len(expected), 'schema_checks': schema,
         'diagnostics': payload['meta']['diagnostics'],
         'sizes': {'source_files': client.file_sizes, 'replay_pagination': client.settings.pagination_max_kb,
@@ -200,7 +212,7 @@ def compare(project, tasks, reports, output, synthetic=False, settings=None):
     }
     output.mkdir(parents=True, exist_ok=True)
     for name, value in [('comparison.json', comparison), ('insight_reference_alarm.json', expected),
-                        ('openvas_filtered.json', filtered), ('openvas_prepared_backend.json', prepared)]:
+                        ('openvas_snapshot_request.json', prepared['request_payload']), ('openvas_filtered.json', filtered), ('openvas_prepared_backend.json', prepared)]:
         (output / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     return comparison
 

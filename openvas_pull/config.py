@@ -33,7 +33,7 @@ class Settings:
     backend_enabled: bool = False
     backend_url: str = 'https://10.208.232.208/txdxsecure/guarda_alarma.php'
     backend_local: str = 'Txdxsecure'
-    backend_alarm_type: str = '1 - Alarma de seguridad'
+    backend_alarm_type: str = 'Alarma de seguridad de OpenVAS x TXDXSecure'
     backend_timeout: int = 30
     backend_verify_ssl: bool = True
     delivery_dedup_enabled: bool = True
@@ -76,7 +76,7 @@ def load_settings(env_file='.env'):
         backend_enabled=flag('BACKEND_ENABLED'),
         backend_url=os.getenv('BACKEND_URL', Settings.backend_url),
         backend_local=os.getenv('BACKEND_LOCAL', 'Txdxsecure'),
-        backend_alarm_type=os.getenv('BACKEND_ALARM_TYPE', '1 - Alarma de seguridad'),
+        backend_alarm_type=os.getenv('BACKEND_ALARM_TYPE', 'Alarma de seguridad de OpenVAS x TXDXSecure'),
         backend_timeout=int(os.getenv('BACKEND_TIMEOUT', '30')),
         backend_verify_ssl=flag('BACKEND_TLS_VERIFY', True),
         delivery_dedup_enabled=flag('DELIVERY_DEDUP_ENABLED', True),

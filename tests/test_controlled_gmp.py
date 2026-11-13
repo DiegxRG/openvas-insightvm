@@ -101,8 +101,8 @@ def test_controlled_download_filters_before_transfer(gmp_service):
     assert optimized['report_pages'] < baseline['report_pages']
     assert {f['vulnerability_id'] for f in old['findings']} == {f['vulnerability_id'] for f in new['findings']}
     assert {f['severity'] for f in new['findings']} == {'critical', 'high'}
-    old_prepared = BackendAlarmClient(cfg).prepare_filtered_findings(old)
-    new_prepared = BackendAlarmClient(cfg).prepare_filtered_findings(new)
+    old_prepared = BackendAlarmClient(cfg).prepare_filtered_findings(old, snapshot_id='fixed')
+    new_prepared = BackendAlarmClient(cfg).prepare_filtered_findings(new, snapshot_id='fixed')
     assert old_prepared == new_prepared
     assert new_prepared['prepared_alarms_count'] == 200
     assert new_prepared['validation_errors'] == 0

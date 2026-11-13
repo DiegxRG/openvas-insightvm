@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from uuid import uuid4
 from typing import Any
 
 import requests
@@ -16,17 +17,19 @@ class BackendAlarmClient:
         self.settings = settings
         self.session = requests.Session()
 
-    def prepare_filtered_findings(self, filtered_payload: dict[str, Any]) -> dict[str, Any]:
+    def prepare_filtered_findings(self, filtered_payload: dict[str, Any], snapshot_id: str | None = None) -> dict[str, Any]:
         findings = filtered_payload.get("findings", [])
+        malformed = not isinstance(findings, list)
         if not isinstance(findings, list):
             findings = []
 
         alarms: list[dict[str, Any]] = []
         skipped_findings: list[dict[str, Any]] = []
-        validation_errors = 0
+        validation_errors = int(malformed)
 
         for finding in findings:
             if not isinstance(finding, dict):
+                validation_errors += 1
                 continue
             alarm = self._build_alarm_payload(finding)
             if alarm is None:
@@ -41,7 +44,10 @@ class BackendAlarmClient:
                 continue
             alarms.append(alarm)
 
+        snapshot_id = snapshot_id or str(uuid4())
         payload = {
+            "snapshot_id": snapshot_id,
+            "request_payload": {"snapshot_id": snapshot_id, "alarms": alarms},
             "enabled": self.settings.backend_enabled,
             "total_filtered_findings": len(findings),
             "prepared_alarms_count": len(alarms),
@@ -54,10 +60,10 @@ class BackendAlarmClient:
 
     def send_filtered_findings(self, filtered_payload: dict[str, Any]) -> dict[str, Any]:
         prepared_payload = self.prepare_filtered_findings(filtered_payload)
-        return self.send_prepared_alarms(prepared_payload, findings=filtered_payload.get('findings', []))
+        return self.send_prepared_alarms(prepared_payload, findings=filtered_payload.get('findings', []), complete_snapshot=not filtered_payload.get('meta', {}).get('diagnostics'))
 
-    def send_prepared_alarms(self, prepared_payload: dict[str, Any], *, findings=None, complete_snapshot=False, snapshot_started_at=None) -> dict[str, Any]:
-        if self.settings.backend_enabled and self.settings.delivery_dedup_enabled:
+    def send_prepared_alarms(self, prepared_payload: dict[str, Any], *, findings=None, complete_snapshot=True, snapshot_started_at=None) -> dict[str, Any]:
+        if self.settings.backend_enabled:
             from openvas_pull.delivery import deliver
             try:
                 return deliver(self, prepared_payload, findings=findings, complete_snapshot=complete_snapshot, snapshot_started_at=snapshot_started_at)
@@ -66,9 +72,9 @@ class BackendAlarmClient:
                 return {'enabled': True, 'dedup_enabled': True, 'sent_ok': 0, 'conflicts': 0,
                         'backend_errors': 1, 'validation_errors': prepared_payload.get('validation_errors', 0),
                         'details': [{'success': False, 'message': str(exc)}]}
-        return self._send_without_dedup(prepared_payload)
+        return self._disabled_result(prepared_payload)
 
-    def _send_without_dedup(self, prepared_payload: dict[str, Any]) -> dict[str, Any]:
+    def _disabled_result(self, prepared_payload: dict[str, Any]) -> dict[str, Any]:
         alarms = prepared_payload.get("alarms", [])
         if not isinstance(alarms, list):
             alarms = []
@@ -88,34 +94,6 @@ class BackendAlarmClient:
                 "details": details,
             }
 
-        sent_ok = 0
-        conflicts = 0
-        backend_errors = 0
-
-        for alarm in alarms:
-            if not isinstance(alarm, dict):
-                continue
-            result = self._post_alarm(alarm)
-            details.append(result)
-            if result.get("success") is True:
-                sent_ok += 1
-            elif "Ya existe un registro activo" in str(result.get("message", "")):
-                conflicts += 1
-            else:
-                backend_errors += 1
-
-        return {
-            "enabled": self.settings.backend_enabled,
-            "skipped": False,
-            "total_filtered_findings": int(prepared_payload.get("total_filtered_findings", len(alarms))),
-            "prepared_alarms": len(alarms),
-            "sent_ok": sent_ok,
-            "conflicts": conflicts,
-            "validation_errors": validation_errors,
-            "backend_errors": backend_errors,
-            "details": details,
-        }
-
     def _build_alarm_payload(self, finding: dict[str, Any]) -> dict[str, Any] | None:
         servidor = str(finding.get("asset_hostname") or "").strip()
         ip = str(finding.get("asset_ip") or "").strip()
@@ -128,13 +106,10 @@ class BackendAlarmClient:
 
         sev = str(finding.get("severity") or "").lower()
         title = str(finding.get("vulnerability_title") or finding.get("title") or "Alarma de seguridad").strip()
-        tipo = f"{self.settings.backend_alarm_type} [{_display_severity(sev)}] - {title}"
+        tipo = self.settings.backend_alarm_type
         fecha = str(finding.get("fechaalarma") or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cves = finding.get("cves")
-        if isinstance(cves, list):
-            cves = ", ".join(str(item).strip() for item in cves if str(item).strip())
-        elif cves is None:
-            cves = ""
+        from openvas_pull.delivery import normalized_cves
+        cves = normalized_cves(finding.get("cves"))
 
         cvss_score = finding.get("cvss_score")
         if cvss_score is None:
@@ -158,18 +133,18 @@ class BackendAlarmClient:
             "source": str(finding.get("source") or "openvas").strip() or "openvas",
         }
 
-    def _post_alarm(self, alarm_payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_snapshot(self, snapshot_payload: dict[str, Any]) -> dict[str, Any]:
         try:
             response = self.session.post(
                 self.settings.backend_url,
-                json=alarm_payload,
+                json=snapshot_payload,
                 timeout=self.settings.backend_timeout,
                 verify=self.settings.backend_verify_ssl,
                 headers={"Content-Type": "application/json"},
             )
         except Exception as exc:
             log.error("Backend connection error: %s", exc)
-            return {"success": False, "message": f"Connection error: {exc}", "alarm_payload": alarm_payload}
+            return {"success": False, "message": f"Connection error: {exc}", "snapshot_id": snapshot_payload["snapshot_id"]}
 
         try:
             data = response.json()
@@ -180,7 +155,7 @@ class BackendAlarmClient:
             data = {"success": False, "message": "Invalid backend response format"}
 
         data["http_status"] = response.status_code
-        data["alarm_payload"] = alarm_payload
+        data["snapshot_id"] = snapshot_payload["snapshot_id"]
         return data
 
 

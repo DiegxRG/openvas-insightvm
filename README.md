@@ -2,7 +2,7 @@
 
 Agente Python que consulta reportes existentes de OpenVAS/Greenbone mediante GMP y transforma sus resultados al mismo contrato JSON de alarmas de INSIGHT-MIFIBRA. Descarga metadata, filtra vulnerabilidades altas y críticas y prepara el JSON para MiFibra/Txdxsecure. El envío al backend es opcional y está deshabilitado por defecto.
 
-La [capa de entrega persistente y antiduplicados](docs/DELIVERY.md) utiliza SQLite local para omitir versiones confirmadas, conservar cambios y reintentar pendientes sin modificar los 13 campos del backend.
+La [capa de entrega persistente y antiduplicados](docs/DELIVERY.md) utiliza SQLite para conservar snapshots completos, detectar cambios de contenido y reintentar con el mismo ID. El POST contiene snapshot_id y alarms; cada alarma mantiene 13 campos y cves es una lista.
 
 Solo consulta datos existentes; no inicia escaneos. El comando de comparación nunca envía alarmas, incluso si el archivo de configuración habilita el backend.
 
@@ -67,7 +67,7 @@ Si la captura termina, se generan:
 
 | Archivo dentro de validation/metadata_live/ | Contenido |
 |---|---|
-| openvas_prepared_backend.json | JSON final; alarms contiene los objetos que se enviarían individualmente |
+| openvas_prepared_backend.json | Preparación completa; request_payload contiene el snapshot que se enviaría |
 | openvas_filtered.json | Hallazgos normalizados y ocurrencias por puerto/tarea |
 | comparison.json | Resultado de validación, campos y tipos |
 | capture_metrics.json | Tamaños por página/reporte, archivos combinados y error de captura si ocurre |
@@ -123,7 +123,7 @@ python main.py
 
 Se detiene con Ctrl+C; cerrar la terminal puede detenerlo. Esta guía cubre instalación y pruebas manuales. La operación permanente requiere configurar un supervisor como systemd.
 
-Después de validar los datos, `BACKEND_ENABLED=true` habilita POST individuales al BACKEND_URL. El comando compare_metadata continúa sin enviar alarmas. main.py --once devuelve código 1 si falla la captura o hay errores de envío/validación. Logs: logs/integration.log.
+Después de validar los datos, `BACKEND_ENABLED=true` habilita un POST de snapshot completo al BACKEND_URL cuando cambia el contenido. El comando compare_metadata continúa sin enviar alarmas. main.py --once devuelve código 1 si falla la captura o hay errores de envío/validación. Logs: logs/integration.log.
 
 ## 6. Qué obtiene y qué envía
 
@@ -144,7 +144,7 @@ El backend recibe estas 13 claves, como INSIGHT:
 | finding_id | asset_id + "_" + vulnerability_id |
 | servidor | Hostname; IP como respaldo |
 | ip | Host afectado |
-| TipoAlarma | 1 - Alarma de seguridad [Critical] - título, o High |
+| TipoAlarma | BACKEND_ALARM_TYPE; etiqueta fija de OpenVAS |
 | Local | BACKEND_LOCAL |
 | fechaalarma | creation_time del resultado; respaldo scan_end, en UTC |
 | asset_id | openvas:IP |
@@ -152,10 +152,10 @@ El backend recibe estas 13 claves, como INSIGHT:
 | vulnerability_title | Título del resultado/NVT |
 | severity | High o Critical |
 | cvss_score | Número entre 7.0 y 10.0 |
-| cves | Texto con CVEs separados por comas |
+| cves | Lista JSON de CVEs; [] si no hay |
 | source | openvas |
 
-BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php`. Cada objeto de alarms se envía individualmente con Content-Type application/json. Se espera una respuesta JSON con success; el mensaje "Ya existe un registro activo" se contabiliza como conflicto.
+BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php`. Se envía un único objeto {"snapshot_id": "ID", "alarms": [...]} con toda la foto actual y Content-Type application/json. El archivo snapshot_request_latest.json contiene ese envoltorio sin metadatos internos. Se espera una respuesta JSON con success; el mensaje "Ya existe un registro activo" se contabiliza como conflicto.
 
 ## 7. Reglas y límites
 
@@ -184,7 +184,7 @@ nc -vz -w 5 10.208.232.43 41000
 
 ConnectionRefusedError indica rechazo de la conexión; revisar puerto y servicio. PermissionError indica un bloqueo local de permisos o política de red. Un rechazo GMP con código de estado ocurre después de abrir TCP y requiere revisar el servicio/permisos/credenciales según el caso.
 
-La descarga real aún debe validarse desde un servidor con acceso; no se pudo conectar desde el entorno de desarrollo.
+La captura real guardada del servidor contiene 1.258 grupos altos/críticos. Esta versión se valida con esos hallazgos guardados y receptor simulado; no certifica aceptación del PHP productivo.
 
 ## 9. Pruebas sin conexión a OpenVAS
 
@@ -194,7 +194,7 @@ python -m pytest -q
 python tools/compare_metadata.py
 ```
 
-Los XML sintéticos producen una alarma Critical y otra High, descartando Medium/Low/Info. Resultados: validation/metadata/. La referencia incluida procede de la prueba test_backend_prepare_filtered_findings_includes_extended_fields de INSIGHT-MIFIBRA; no es una captura productiva.
+Los XML sintéticos producen una alarma Critical y otra High, descartando Medium/Low/Info. Resultados: validation/metadata/. La referencia actual reproduce el contrato del cliente INSIGHT del servidor (commit 02cb850): snapshot_id/alarms y CVEs como lista; es un ejemplo estructural. Ver [procedencia y alcance](docs/REMOTE_INSIGHT_CONTRACT.md).
 
 La suite incluye un servicio GMP simulado en `127.0.0.1`, con credenciales ficticias y POST al backend bloqueados durante la prueba. Requiere permiso para conexiones loopback; no contacta OpenVAS ni SSH. Para ejecutar únicamente esa prueba:
 
@@ -202,9 +202,9 @@ La suite incluye un servicio GMP simulado en `127.0.0.1`, con credenciales ficti
 python -m pytest tests/test_controlled_gmp.py -q
 ```
 
-La comparación entre descarga anterior y filtrada queda en `validation/local_controlled/summary.json`. Los tiempos de ese servicio sintético no predicen tiempos de Nexus. Ver [el informe local](docs/validation/2026-11-13-local/README.md).
+La comparación entre descarga anterior y filtrada queda en `validation/local_controlled/summary.json`. Los tiempos de ese servicio sintético no predicen tiempos del servidor. Ver [el informe local](docs/validation/2026-11-13-local/README.md).
 
-Opcionalmente, con el proyecto original disponible, comparar además con su constructor real:
+Opcionalmente, con la versión del proyecto del servidor disponible, comparar además su constructor. La copia local antigua de envío individual se marcará incompatible:
 
 ```bash
 python tools/compare_metadata.py --insight-project ../INSIGHT-MIFIBRA
@@ -218,7 +218,7 @@ python tools/compare_metadata.py --tasks-xml tasks.xml --report-xml report.xml
 
 Repetir --report-xml para cada reporte de las tareas. Una comparación estructural aprobada no demuestra conectividad ni aceptación del backend. Los resultados, XML reales, logs, entornos virtuales y secretos quedan excluidos de Git.
 
-## 10. Repetir la validación de Nexus
+## 10. Referencia histórica de validación del servidor
 
 El informe original está en [docs/validation/2026-11-12-nexus/README.md](docs/validation/2026-11-12-nexus/README.md). Se corrigieron la pérdida de configuración entre captura y comparación y la repetición de metadata al paginar XML locales. La lectura local conserva los XML originales y crea páginas compactas para normalizar los resultados.
 
@@ -241,4 +241,6 @@ Después probar una sola tarea con GVM_TASK_IDS en un .env propio del proyecto, 
 python tools/compare_metadata.py --live --output validation/metadata_live_retest
 ```
 
-Revisar comparison.json y capture_metrics.json antes de ampliar a las demás tareas. Las métricas identifican tarea, reporte, página, tamaño de respuesta y tráfico acumulado; el XML combinado tiene su tamaño propio. Si se alcanza un límite, no seguir aumentándolo sin identificar el reporte y comprobar los recursos disponibles. El caso de captura completa de 47 tareas sigue pendiente de validación real; las pruebas sintéticas no lo certifican.
+Revisar comparison.json y capture_metrics.json antes de ampliar a las demás tareas. Las métricas identifican tarea, reporte, página, tamaño de respuesta y tráfico acumulado; el XML combinado tiene su tamaño propio. Si se alcanza un límite, no seguir aumentándolo sin identificar el reporte y comprobar los recursos disponibles. La captura guardada posterior de 47 tareas se usa en la [validación de snapshots](docs/validation/2026-11-13-snapshots/README.md). El informe anterior se conserva como historial.
+
+Para el flujo actual de entrega completa, reintentos, migración SQLite y controles, ver [docs/DELIVERY.md](docs/DELIVERY.md). Al actualizar instalaciones existentes, fijar BACKEND_ALARM_TYPE=Alarma de seguridad de OpenVAS x TXDXSecure en su .env; Git no modifica ese archivo privado.
