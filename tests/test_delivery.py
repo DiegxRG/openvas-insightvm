@@ -485,3 +485,39 @@ def test_backend_cannot_self_assert_replay_without_matching_receipt(cfg):
         def json(self):return {'success':False,'idempotent_replay_confirmed':True,'message':'unknown error'}
     r=client(cfg,[],lambda p:Bad()).send_prepared_alarms(prepared())
     assert r['pending_total']==1 and r['sent_ok']==0
+
+
+def test_pending_only_no_database_is_idle_without_creating_state(cfg):
+    calls=[]
+    r=client(cfg,calls).retry_pending()
+    assert r['attempted']==0 and r['pending_total']==0 and r['backend_errors']==0
+    assert calls==[] and not Path(cfg.delivery_state_path).exists()
+
+
+def test_pending_only_respects_backoff_and_never_enqueues(cfg,clock,monkeypatch):
+    from openvas_pull.delivery import Outbox
+    calls=[]
+    def fail(_):raise TimeoutError('controlled failure')
+    client(cfg,calls,fail).send_prepared_alarms(prepared(3))
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        before=db.execute('SELECT * FROM snapshot_checkpoints').fetchall()
+    monkeypatch.setattr(Outbox,'enqueue',lambda *a,**k:pytest.fail('Retry must not enqueue observations'))
+    waiting=client(cfg,calls).retry_pending()
+    assert waiting['attempted']==0 and waiting['backend_errors']==0 and waiting['pending_total']==1
+    clock[0]+=2
+    done=client(cfg,calls).retry_pending()
+    assert done['sent_ok']==3 and done['pending_total']==0 and done['backend_errors']==0
+    assert calls[0]==calls[1]
+    assert client(cfg,calls).retry_pending()['attempted']==0
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        assert db.execute('SELECT * FROM snapshot_checkpoints').fetchall()==before
+        assert db.execute('SELECT count(*) FROM snapshot_events').fetchone()[0]==1
+
+
+def test_disabled_pending_only_does_not_touch_existing_queue(cfg,clock):
+    calls=[]
+    def fail(_):raise TimeoutError('controlled failure')
+    client(cfg,calls,fail).send_prepared_alarms(prepared())
+    before=Path(cfg.delivery_state_path).read_bytes()
+    assert client(replace(cfg,backend_enabled=False),calls).retry_pending()['skipped'] is True
+    assert Path(cfg.delivery_state_path).read_bytes()==before and len(calls)==1

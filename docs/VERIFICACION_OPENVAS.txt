@@ -1,0 +1,141 @@
+PROMPT PARA PEGAR EN CODEX LA PROXIMA SEMANA
+
+Revisa por SSH la ultima ejecucion semanal de OpenVAS MiFibra y sus reintentos
+automaticos. Es una verificacion de consulta: no fuerces envios, no descargues
+metadata otra vez, no ejecutes --once/--retry-pending manualmente ni cambies cron,
+.env o SQLite para repetir la prueba. No toques MAD ni reactives Insight.
+No descargues JSON de hallazgos a mi laptop salvo que te lo pida expresamente.
+
+CONTEXTO
+- SSH configurado: ssh nexus (servidor 10.208.232.47, hostname NEXUS).
+- Usuario de ejecucion y crontab: desarrollo-xoc.
+- Proyecto: /home/desarrollo-xoc/DESARROLLO/openvas-insightvm
+- Repo local: C:\Users\Diego Ramos\Projects-TxDx\openvas-mifibra
+- Git remoto: https://github.com/DiegxRG/openvas-insightvm.git, rama main.
+- Recoleccion y envio semanal: domingos a las 09:00, America/Lima.
+- Launcher semanal: scripts/run_weekly_delivery.sh.
+- Pendientes: cron cada minuto con scripts/run_pending_retries.sh y --retry-pending.
+- Backoff: 60 segundos, exponencial hasta 3600; el cron agrega hasta un minuto.
+- Reintenta el MISMO snapshot_id ISO UTC y JSON de SQLite, sin consultar GMP.
+- Insight MiFibra: cron comentado por licencias; debe seguir asi.
+- MAD usa otro proyecto/timer; debe permanecer intacto.
+- Snapshot completo: solo altas/criticas, todas las visibles del ultimo reporte
+  completado por tarea; sin TOP_N. Los pendientes mantienen orden FIFO.
+- Backend habilitado, Local=Mi Fibra, timeout=180, TLS verificado con CA privada.
+  No mostrar secretos del .env ni cambiar sus credenciales.
+
+COMPRUEBA Y ENTREGA UN INFORME CON EVIDENCIAS
+1. HEAD, rama, origin/main y cambios locales tanto en laptop como en servidor.
+   Puedes hacer git fetch para verificar; no sobreescribir trabajo ajeno.
+2. Crontab: semanal domingo 09:00 con CRON_TZ=America/Lima; reintentos cada minuto;
+   una sola entrada de cada tipo e Insight desactivado. Comprueba crond.
+3. Hora REAL de inicio y resultado de la ultima captura semanal en hora Lima.
+   Si la primera revision es el 15/11/2026 o la semana siguiente, revisar la
+   corrida del domingo 15/11/2026 desde las 09:00, y los reintentos posteriores.
+4. Cuantas alarmas recolecto, preparo y confirmo; numero de snapshots e intentos
+   de envio, repeticiones reconocidas, errores de GMP/validacion/backend.
+   No suponer que siempre deben ser 1258: esa fue la captura controlada anterior.
+5. SQLite: cuantos snapshots estan acked/pending, sus IDs, fallos acumulados,
+   ultimo error e instante elegible del siguiente reintento en hora Lima.
+6. Correlaciona el resultado semanal con retry_latest.meta.json y SQLite. Un
+   fallo semanal puede haberse resuelto luego: SQLite es el estado final.
+7. Confirma que los reintentos no encolaron snapshots nuevos ni consultaron GMP,
+   que conservaron ID/JSON y que no hay errores distintos disfrazados de duplicados.
+8. Si hay pendientes, explica la causa y lo que falta; no fuerces un reenvio.
+9. Presenta primero el estado general y despues evidencias y acciones concretas
+   si hay fallos. No afirmes que los cierres funcionan: no se probaron aqui.
+
+RUTAS (DENTRO DEL PROYECTO DEL SERVIDOR)
+- cloud_audit_log/cron.log: salida del launcher semanal.
+- logs/integration.log y sus .1 ... .5: log rotativo semanal.
+- cloud_audit_log/retry.log: salida del launcher de reintentos.
+- logs/retry.log y sus .1 ... .5: log rotativo de reintentos.
+- runtime/openvas/artifacts/run_latest.meta.json: resultado semanal.
+- runtime/openvas/artifacts/retry_latest.meta.json: ultimo intento/error del worker.
+- runtime/openvas/artifacts/filtered_latest.json: hallazgos completos agrupados.
+- runtime/openvas/artifacts/prepared_backend_latest.json: preparacion y request_payload.
+- runtime/openvas/artifacts/snapshot_request_latest.json: JSON listo para backend.
+- runtime/openvas/delivery.sqlite3: cola e historial, esquema 3 o posterior.
+- validation/: evidencias manuales; no confundirlas con ejecuciones productivas.
+
+COMANDOS DE CONSULTA
+
+ssh nexus
+sudo -u desarrollo-xoc -H bash
+cd /home/desarrollo-xoc/DESARROLLO/openvas-insightvm
+crontab -l
+git fetch origin main
+git status --short
+git rev-parse HEAD
+git rev-parse origin/main
+git rev-list --left-right --count HEAD...origin/main
+tail -n 100 cloud_audit_log/cron.log
+tail -n 100 logs/integration.log
+tail -n 100 cloud_audit_log/retry.log
+tail -n 100 logs/retry.log
+pgrep -af '/home/desarrollo-xoc/DESARROLLO/openvas-insightvm/main.py'
+.venv/bin/python tools/delivery_state.py stats
+
+RESUMEN DE AMBAS METADATAS (NO IMPRIME JSON DE HALLAZGOS)
+.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
+for name in ('run_latest.meta.json', 'retry_latest.meta.json'):
+    p=Path('runtime/openvas/artifacts')/name
+    if not p.exists():
+        print(name, 'todavia no existe'); continue
+    m=json.loads(p.read_text()); b=m.get('backend', {})
+    print(json.dumps({'archivo':name,
+      'fecha_Lima':datetime.fromisoformat(m['started_at']).astimezone(ZoneInfo('America/Lima')).isoformat(),
+      'recoleccion_ok':m.get('success'), 'error_captura':m.get('error'),
+      'hallazgos':m.get('filtered_findings'), 'backend_enabled':b.get('enabled'),
+      'alarmas_confirmadas':b.get('sent_ok'), 'snapshots_confirmados':b.get('snapshots_sent'),
+      'intentos_envio':b.get('attempted'), 'repeticiones_confirmadas':b.get('replayed_snapshots'),
+      'errores_backend':b.get('backend_errors'), 'errores_validacion':b.get('validation_errors'),
+      'pendientes_en_ese_momento':b.get('pending_total'), 'comparacion':b.get('queued')},
+      ensure_ascii=False, indent=2))
+PY
+
+ULTIMOS SNAPSHOTS: SOLO LECTURA, NO CREA SQLITE SI FALTA
+.venv/bin/python - <<'PY'
+import json,sqlite3
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
+p=Path('runtime/openvas/delivery.sqlite3').resolve()
+if not p.exists(): raise SystemExit('No existe la cola productiva todavia')
+with sqlite3.connect(p.as_uri()+'?mode=ro',uri=True) as db:
+    db.row_factory=sqlite3.Row
+    for row in db.execute('SELECT snapshot_id,status,attempts,next_attempt,last_error,payload FROM snapshot_events ORDER BY id DESC LIMIT 15'):
+        r=dict(row); r['alarmas']=len(json.loads(r.pop('payload')).get('alarms',[]))
+        epoch=r.pop('next_attempt')
+        r['elegible_desde_Lima']=datetime.fromtimestamp(epoch,ZoneInfo('America/Lima')).isoformat() if r['status']=='pending' and epoch else None
+        print(json.dumps(r,ensure_ascii=False))
+PY
+
+PRUEBA DEL DISPARO DEL CRON (DESDE LA SHELL DE diego.ramos CON SUDO)
+# Si estas dentro de la shell desarrollo-xoc, usa exit una vez para volver.
+sudo systemctl is-active crond
+sudo journalctl -u crond --since '2026-11-15 08:55:00' --no-pager | grep -E 'run_weekly_delivery|run_pending_retries' | tail -n 120
+# Ajustar la fecha al domingo realmente revisado. Si journald no conserva esos
+# registros, revisar /var/log/cron y sus rotaciones sin cambiar configuracion.
+
+COMO INTERPRETAR
+- success=true en metadata semanal confirma recoleccion, NO todo el backend.
+- sent_ok cuenta alarmas confirmadas, tambien las de repeticiones reconocidas;
+  no es necesariamente el numero de filas nuevas ni de hallazgos unicos.
+- unchanged=1 e intentos=0 es correcto si no cambio nada y no habia pendientes.
+- acked: confirmado. pending: pendiente. attempts: fallos de envio acumulados.
+- Una fila acked con attempts>0 tuvo fallos anteriores y luego se confirmo.
+- next_attempt es elegibilidad, no un proceso autonomo: el cron por minuto lo revisa.
+- El worker silencioso sin pendientes no actualiza retry_latest.meta.json; que
+  falte ese archivo no demuestra que el cron no funciona. Correlacionar con cron.
+- Los reintentos NO sobrescriben el resultado semanal. Su pending_total puede
+  quedar historico; consultar SQLite para saber cuantos quedan AHORA.
+- No hay descargas automaticas a la laptop. *_latest se sobrescribe; SQLite
+  conserva pendientes e historial confirmado 90 dias por defecto.
+- No ejecutar delivery_state.py retry/force-next-snapshot durante la revision.
+
+FIN DEL PROMPT

@@ -174,3 +174,13 @@ superó el valor anterior de 30. BACKEND_CA_BUNDLE permite indicar un PEM de con
 para el certificado privado/autofirmado sin deshabilitar la verificación TLS.
 El certificado observado vence el 30 de marzo de 2027; su autenticidad inicial
 se basó en la conexión al endpoint interno autorizado, no en una CA pública.
+
+
+## Proceso de reintento sin recolección
+
+main.py --retry-pending procesa solo la cola existente y respeta los instantes
+elegibles/FIFO. El modo no llama enqueue, no toca el checkpoint de observación,
+no consulta GMP y no reconstruye el JSON ni su ID. Sin base retorna inactivo
+sin crear SQLite. Los errores quedan pendientes con backoff. El cron adicional
+comprueba cada minuto, independientemente de la recolección semanal; configuración
+y logs en [CRON.md](CRON.md). No hay reintentos de filas acked.

@@ -255,3 +255,5 @@ El launcher run_weekly_validation.sh sigue disponible para pruebas sin envío.
 Ver [configuración y controles](docs/CRON.md).
 
 La [prueba autorizada del endpoint real](docs/validation/2026-11-13-endpoint/README.md) confirmó 1.258 registros y el rechazo de la repetición idéntica por llave compuesta. Se corrigieron IDs ISO UTC, ACK de repetición, timeout y confianza TLS configurable. La prueba mantuvo el cron sin envío; después se autorizó el cron de producción descrito arriba. No hay descargas automáticas a la laptop por POST; ver [retención de artefactos](docs/DELIVERY.md).
+
+Los pendientes se revisan automáticamente cada minuto con --retry-pending, sin volver a consultar OpenVAS y respetando backoff/FIFO. La captura semanal de domingos a las 09:00 se conserva. Ver [cron y logs](docs/CRON.md) y [prompt de verificación](docs/VERIFICACION_OPENVAS.txt).

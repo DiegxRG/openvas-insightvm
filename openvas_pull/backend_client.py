@@ -62,6 +62,18 @@ class BackendAlarmClient:
         prepared_payload = self.prepare_filtered_findings(filtered_payload)
         return self.send_prepared_alarms(prepared_payload, findings=filtered_payload.get('findings', []), complete_snapshot=not filtered_payload.get('meta', {}).get('diagnostics'))
 
+    def retry_pending(self) -> dict[str, Any]:
+        if not self.settings.backend_enabled:
+            return {'enabled': False, 'retry_only': True, 'skipped': True, 'attempted': 0,
+                    'backend_errors': 0, 'conflicts': 0, 'details': []}
+        from openvas_pull.delivery import deliver
+        try:
+            return deliver(self, {'alarms': [], 'validation_errors': 0}, retry_only=True)
+        except Exception as exc:
+            log.exception('Pending-only delivery failed; no collection or fallback')
+            return {'enabled': True, 'retry_only': True, 'attempted': 0, 'backend_errors': 1,
+                    'conflicts': 0, 'details': [{'success': False, 'message': str(exc)}]}
+
     def send_prepared_alarms(self, prepared_payload: dict[str, Any], *, findings=None, complete_snapshot=True, snapshot_started_at=None) -> dict[str, Any]:
         if self.settings.backend_enabled:
             from openvas_pull.delivery import deliver

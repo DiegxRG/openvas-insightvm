@@ -177,9 +177,13 @@ class Outbox:
                             (scope, now - days * 86400))
 
 
-def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapshot_started_at=None):
+def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapshot_started_at=None, retry_only=False):
     settings = client.settings
     path = Path(settings.delivery_state_path).resolve()
+    if retry_only and not path.exists():
+        return {'enabled': True, 'retry_only': True, 'skipped': True, 'reason': 'no_database',
+                'attempted': 0, 'sent_ok': 0, 'snapshots_sent': 0, 'replayed_snapshots': 0,
+                'backend_errors': 0, 'conflicts': 0, 'pending_total': 0, 'details': []}
     path.parent.mkdir(parents=True, exist_ok=True)
     scope = scope_key(settings)
     with sender_lock(path.with_name(path.name + '.' + scope + '.lock')):
@@ -189,18 +193,18 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
             complete = complete_snapshot and not prepared.get('validation_errors')
             if complete and not isinstance(prepared.get('alarms'), list):
                 raise ValueError('Missing/invalid alarms list; refusing an implicit empty snapshot')
-            counts = store.enqueue(scope, prepared.get('alarms', []), findings, complete, now,
+            counts = {'retry_only': True} if retry_only else store.enqueue(scope, prepared.get('alarms', []), findings, complete, now,
                                    now if snapshot_started_at is None else snapshot_started_at,
                                    dedup=settings.delivery_dedup_enabled)
             if counts.get('snapshot_id'):
                 prepared['snapshot_id'] = counts['snapshot_id']
                 prepared['request_payload'] = {'snapshot_id': counts['snapshot_id'], 'alarms': prepared.get('alarms', [])}
-            result = {'enabled': True, 'skipped': not complete, 'dedup_enabled': settings.delivery_dedup_enabled,
+            result = {'enabled': True, 'skipped': not complete and not retry_only, 'retry_only': retry_only, 'dedup_enabled': settings.delivery_dedup_enabled,
                       'total_filtered_findings': prepared.get('total_filtered_findings', 0),
                       'prepared_alarms': len(prepared.get('alarms', [])),
                       'validation_errors': prepared.get('validation_errors', 0),
                       'sent_ok': 0, 'snapshots_sent': 0, 'replayed_snapshots': 0, 'conflicts': 0,
-                      'backend_errors': 0 if complete else 1,
+                      'backend_errors': 0 if complete or retry_only else 1,
                       'queued': counts, 'attempted': 0, 'details': list(prepared.get('skipped_findings', []))}
             while True:
                 batch = store.due(scope, time.time(), settings.delivery_batch_size)

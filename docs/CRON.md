@@ -81,3 +81,39 @@ pruebas de cierres ni acceso al PHP o su BD.
 ## Identidad del cliente
 
 La revisión de los .env confirmó el mismo endpoint HTTPS para ambos emisores, pero OpenVAS conservaba BACKEND_LOCAL=Txdxsecure mientras Insight usa Mi Fibra. Se corrigió BACKEND_LOCAL=Mi Fibra en OpenVAS y su configuración de ejemplo/default. TipoAlarma y source mantienen identidad OpenVAS. Esto alinea el campo Local sin afirmar cómo lo interpreta internamente el receptor.
+
+## Reintentos automáticos de pendientes
+
+Se conserva intacta la entrada semanal de los domingos a las 09:00. Una entrada
+adicional del mismo usuario desarrollo-xoc despierta el emisor cada minuto:
+
+```cron
+# BEGIN OPENVAS_MIFIBRA_PENDING_RETRIES
+* * * * * /bin/bash /home/desarrollo-xoc/DESARROLLO/openvas-insightvm/scripts/run_pending_retries.sh
+# END OPENVAS_MIFIBRA_PENDING_RETRIES
+```
+
+El launcher ejecuta main.py --retry-pending. No construye OpenVASClient ni
+OpenVASCollector, no consulta GMP ni encola capturas vacías o nuevas. Solo lee
+los snapshots pendientes de DELIVERY_STATE_PATH para el ámbito configurado;
+envía exactamente el ID y JSON almacenados. Sin base/pendientes no hace POST.
+BACKEND_ENABLED=false o --no-backend también deshabilitan estos reintentos.
+
+Se respeta FIFO y next_attempt: backoff de 60 segundos hasta 3600 segundos por
+defecto, con resolución adicional del cron de hasta un minuto. Se conserva la
+misma validación estricta de duplicados. Un reintento antiguo no adelanta a otro.
+Comparte el bloqueo con el proceso semanal y el launcher de validación; si el
+bloqueo está ocupado, termina sin error y vuelve a comprobar al minuto siguiente.
+No utiliza --once: --retry-pending ya ejecuta una sola pasada de la cola y sale.
+
+Logs adicionales: cloud_audit_log/retry.log (stdout/stderr del cron) y
+logs/retry.log (rotativo, hasta 5 respaldos de 2 MB). Las corridas sin intentos
+ni errores no generan mensajes ni actualizan metadata; no se crea historial
+JSON por minuto. Los intentos/errores actualizan solo
+runtime/openvas/artifacts/retry_latest.meta.json. La metadata semanal
+run_latest.meta.json no se sobrescribe por reintentos. La SQLite muestra el
+estado final autoritativo: una entrega semanal inicialmente fallida puede
+quedar confirmada después por este proceso.
+
+No ejecutar main.py --once para revisar pendientes: vuelve a consultar GMP.
+Los comandos de consulta para la revisión están en [VERIFICACION_OPENVAS.txt](VERIFICACION_OPENVAS.txt).

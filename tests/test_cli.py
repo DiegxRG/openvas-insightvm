@@ -59,3 +59,25 @@ def test_collection_only_runs_real_scheduler_without_http_or_outbox(monkeypatch,
     wire = json.loads((output/'snapshot_request_latest.json').read_text(encoding='utf-8'))
     assert set(wire) == {'snapshot_id', 'alarms'} and len(wire['alarms']) == 2
     assert json.loads((output/'run_latest.meta.json').read_text(encoding='utf-8'))['backend']['enabled'] is False
+
+
+@pytest.mark.parametrize('attempted',[0,1])
+def test_pending_cli_never_constructs_collector_or_overwrites_weekly_metadata(monkeypatch,tmp_path,attempted):
+    cfg=Settings(gvm_host='offline',gvm_port=1,gvm_user='test',gvm_password='unused',backend_enabled=True,payload_dir=str(tmp_path),log_file=str(tmp_path/'integration.log'))
+    weekly=tmp_path/'run_latest.meta.json';weekly.write_text('weekly evidence unchanged')
+    monkeypatch.setattr(cli.sys,'argv',['main.py','--retry-pending'])
+    monkeypatch.setattr(cli,'load_settings',lambda path:cfg)
+    monkeypatch.setattr(cli,'setup_logging',lambda *a:None)
+    monkeypatch.setattr(cli,'OpenVASClient',lambda *a:pytest.fail('No GMP in retry mode'))
+    monkeypatch.setattr(cli,'OpenVASCollector',lambda *a:pytest.fail('No collector in retry mode'))
+    monkeypatch.setattr(cli,'run_service',lambda *a,**k:pytest.fail('No scheduler collection in retry mode'))
+    monkeypatch.setattr(cli.BackendAlarmClient,'retry_pending',lambda self:{'attempted':attempted,'sent_ok':attempted,'pending_total':0,'backend_errors':0,'conflicts':0})
+    cli.main()
+    assert weekly.read_text()=='weekly evidence unchanged'
+    assert (tmp_path/'retry_latest.meta.json').exists()==bool(attempted)
+
+
+def test_pending_cli_rejects_combining_collection_mode(monkeypatch):
+    monkeypatch.setattr(cli.sys,'argv',['main.py','--retry-pending','--once'])
+    with pytest.raises(SystemExit) as exc:cli.main()
+    assert exc.value.code==2
