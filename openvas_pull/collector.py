@@ -113,19 +113,26 @@ class OpenVASCollector:
                         key = (finding['asset_id'], finding['vulnerability_id'])
                         finding['task_id'], finding['report_id'] = task_id, report_id
                         finding['port'] = node.findtext('port', '')
+                        occurrence = {
+                            'report_id': report_id, 'task_id': task_id, 'port': finding['port'],
+                            'result_id': node.get('id'), 'severity': finding['severity'],
+                            'cvss_score': finding['cvss_score'], 'fechaalarma': finding['fechaalarma'],
+                            'cves': list(finding['cves']),
+                        }
                         if key in findings:
                             existing = findings[key]
                             cves = sorted(set(existing['cves'] + finding['cves']))
                             occurrences = existing['occurrences']
-                            # Prefer the latest scan, then the highest score on ties.
-                            if (finding['fechaalarma'], finding['cvss_score']) > (existing['fechaalarma'], existing['cvss_score']):
+                            # Preserve the highest observed severity; newer lower scores
+                            # must never hide a critical occurrence in the same group.
+                            if (finding['cvss_score'], finding['fechaalarma']) > (existing['cvss_score'], existing['fechaalarma']):
                                 findings[key] = finding
                             findings[key]['cves'] = cves
                             findings[key]['occurrences'] = occurrences
                         else:
                             findings[key] = finding
                             finding['occurrences'] = []
-                        findings[key]['occurrences'].append({'report_id': report_id, 'task_id': task_id, 'port': finding['port']})
+                        findings[key]['occurrences'].append(occurrence)
                         assets[finding['asset_id']] = {'id': finding['asset_id'], 'ip': finding['asset_ip'], 'hostname': finding['asset_hostname']}
         return {'assets': list(assets.values()), 'findings': list(findings.values()),
                 'meta': {'assets_count': len(assets), 'findings_count': len(findings), 'diagnostics': diagnostics,

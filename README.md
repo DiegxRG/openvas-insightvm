@@ -161,7 +161,7 @@ BACKEND_URL predeterminado: `https://10.208.232.208/txdxsecure/guarda_alarma.php
 - GVM_TASK_IDS restringe tareas por IDs separados por comas; vacío incluye todas las visibles. Delimitarlo a MiFibra cuando corresponda.
 - Se paginan tareas y resultados. Una página repetida o alcanzar GVM_MAX_PAGES hace fallar el ciclo antes de enviar datos parciales.
 - No se aplica TOP_N. OPENVAS_REPORT_MAX_KB limita cada respuesta y cada XML combinado/exportado a 30720 KiB (30 MiB) por defecto. OPENVAS_PAGINATION_MAX_KB limita por separado el tráfico acumulado de páginas por listado/reporte (65536 KiB, 64 MiB por defecto). Este tráfico puede ser mayor que el archivo combinado debido a metadata repetida por GMP. Todos los límites son en KiB (1024 bytes). Al actualizar una instalación existente, cambiar estos valores también en su .env local, que Git no modifica.
-- Los resultados del mismo equipo y NVT se consolidan. Se prefiere fecha más reciente y, en empate, mayor CVSS; se unen CVEs y conservan ocurrencias localmente.
+- Los resultados del mismo equipo y NVT se consolidan. Se conserva el mayor CVSS y, en empate, la fecha más reciente; una observación alta posterior no puede ocultar una crítica anterior. Se unen CVEs y cada ocurrencia conserva reporte, tarea, puerto, resultado, severidad, CVSS, fecha y CVEs en el JSON local. El contrato del backend mantiene sus 13 campos.
 - La IP identifica el activo; su reasignación afecta la identidad. No se usa el reporte como identidad del equipo.
 - Fechas sin zona se interpretan como UTC. INSIGHT conserva la hora recibida sin convertirla: confirmar con backend la zona horaria esperada.
 - Se descartan resultados sin fecha, IP, título, OID o score válido, con diagnóstico.
