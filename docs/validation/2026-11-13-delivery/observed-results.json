@@ -1,0 +1,19 @@
+{
+  "tested_code_commit": "d6e421f",
+  "tests_passed": 68,
+  "input_alarms": 1258,
+  "first_sent_simulated": 1258,
+  "identical_second_run_requests": 0,
+  "new_critical_simulated": 1,
+  "changed_simulated": 3,
+  "identical_changes_replay_requests": 0,
+  "reappeared_simulated": 1,
+  "pending_at_end": 0,
+  "wire_contract_unchanged": true,
+  "collector_changed": false,
+  "real_backend_posts": 0,
+  "transport": "in_memory_fake_backend",
+  "production_ack_state_created": false,
+  "server_validation": "blocked_ssh_connection_closed",
+  "server_updated": false
+}
