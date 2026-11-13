@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+from dataclasses import replace
 from openvas_pull.config import load_settings
 from openvas_pull.client import OpenVASClient
 from openvas_pull.collector import OpenVASCollector
@@ -12,12 +13,16 @@ def main():
     parser = argparse.ArgumentParser(description='OpenVAS a MiFibra; solo altas y criticas')
     parser.add_argument('--env-file', default='.env')
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--no-backend', action='store_true',
+                        help='Recolectar sin enviar ni reintentar al backend, incluso si .env lo habilita')
     args = parser.parse_args()
     try:
         settings = load_settings(args.env_file)
     except (ValueError, OSError) as exc:
         print(f'Error de configuración: {exc}', file=sys.stderr)
         raise SystemExit(2)
+    if args.no_backend:
+        settings = replace(settings, backend_enabled=False)
     setup_logging(settings.log_level, settings.log_file)
     logging.getLogger(__name__).info('OpenVAS iniciado; severidades=%s backend_enabled=%s', settings.severities, settings.backend_enabled)
     try:

@@ -244,3 +244,7 @@ python tools/compare_metadata.py --live --output validation/metadata_live_retest
 Revisar comparison.json y capture_metrics.json antes de ampliar a las demás tareas. Las métricas identifican tarea, reporte, página, tamaño de respuesta y tráfico acumulado; el XML combinado tiene su tamaño propio. Si se alcanza un límite, no seguir aumentándolo sin identificar el reporte y comprobar los recursos disponibles. La captura guardada posterior de 47 tareas se usa en la [validación de snapshots](docs/validation/2026-11-13-snapshots/README.md). El informe anterior se conserva como historial.
 
 Para el flujo actual de entrega completa, reintentos, migración SQLite y controles, ver [docs/DELIVERY.md](docs/DELIVERY.md). Al actualizar instalaciones existentes, fijar BACKEND_ALARM_TYPE=Alarma de seguridad de OpenVAS x TXDXSecure en su .env; Git no modifica ese archivo privado.
+
+## Cron semanal sin envío
+
+El cron de OpenVAS utiliza el usuario desarrollo-xoc y ejecuta domingos a las 09:00 (America/Lima), como Insight. El wrapper scripts/run_weekly_validation.sh fuerza --once --no-backend y conserva los JSON de revisión. No envía ni reintenta pendientes aunque el .env habilite el backend. Ver [instalación, rutas y alcance de la revisión del receptor](docs/CRON.md).

@@ -75,3 +75,7 @@ deben distinguirse y el receptor debe conocer el origen incluso sin alarmas.
 El backend real permanece deshabilitado. Esta revisión documenta el emisor y
 la propuesta, no confirma que el PHP productivo ya implemente la llave ni la
 reconciliación de cierres.
+
+## Inspección de la carpeta backend
+
+Se revisaron backend/server.py y backend/view_model.py: corresponden a un visor de JSON con GET, sin recepción POST, escritura de alarmas, deduplicación ni cierres. La prueba aislada mostró las 1.258 alarmas de OpenVAS sin perder campos de detalle; duplicar la entrada duplicó las filas. No equivale a validar guarda_alarma.php, ubicado según configuración en 10.208.232.208. El cron se prepara con envío forzado a deshabilitado; detalles en [CRON.md](CRON.md).
