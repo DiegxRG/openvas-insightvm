@@ -1,0 +1,23 @@
+{
+  "tested_commit": "bb8384c24c28075bfd84e7e7ef9169c5f39f7be8",
+  "gmp_version": "22.7",
+  "visible_tasks": 47,
+  "report_tasks_tested": 1,
+  "backend_posts": 0,
+  "initial_implicit_or_capture": "rejected_out_of_filter_results",
+  "final_live_comparison_passed": true,
+  "received_severities": {"high": 5, "critical": 2},
+  "report_pages": 1,
+  "report_response_bytes": 136486,
+  "combined_report_xml_bytes": 136030,
+  "prepared_alarms": 7,
+  "alarm_fields": 13,
+  "discard_diagnostics": 0,
+  "duration_seconds": 5.364,
+  "historical_xml_reprocessing_passed": true,
+  "historical_alarms": 5,
+  "historical_alarms_retained": 5,
+  "additional_critical_alarms": 2,
+  "all_reports_tested": false,
+  "raw_evidence_published": false
+}
