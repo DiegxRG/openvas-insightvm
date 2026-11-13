@@ -1,45 +1,60 @@
-# Cron de OpenVAS MiFibra: recolección sin envío
+# Cron de OpenVAS MiFibra: envío semanal
 
-Ubicación del proyecto en el servidor:
-`/home/desarrollo-xoc/DESARROLLO/openvas-insightvm`.
-Se utiliza el crontab del usuario `desarrollo-xoc`, conservando la entrada de
-INSIGHT-MIFIBRA y sin modificar MAD ni sus servicios.
+Ubicación: `/home/desarrollo-xoc/DESARROLLO/openvas-insightvm`.
+Usuario del crontab: `desarrollo-xoc`.
+
+Por autorización del usuario del 13 de noviembre de 2026 se habilita OpenVAS
+y se comenta la entrada de INSIGHT-MIFIBRA por el motivo de licencias indicado.
+No se elimina el proyecto Insight ni se modifica MAD o sus servicios.
 
 ```cron
-# BEGIN OPENVAS_MIFIBRA_COLLECTION_ONLY
+# BEGIN OPENVAS_MIFIBRA_DELIVERY
 CRON_TZ=America/Lima
-0 9 * * 0 /bin/bash /home/desarrollo-xoc/DESARROLLO/openvas-insightvm/scripts/run_weekly_validation.sh
-# END OPENVAS_MIFIBRA_COLLECTION_ONLY
+0 9 * * 0 /bin/bash /home/desarrollo-xoc/DESARROLLO/openvas-insightvm/scripts/run_weekly_delivery.sh
+# END OPENVAS_MIFIBRA_DELIVERY
 ```
 
-El horario coincide con Insight: domingos a las 09:00, hora de Lima. El cron
-está activo para recolectar; **no está habilitado para enviar alarmas**.
-El wrapper calcula la raíz del proyecto, usa `.venv/bin/python`, ejecuta una
-sola corrida con `--once --no-backend` y aplica umask 077. Un bloqueo flock
-impide corridas simultáneas del wrapper (código 75 si ya hay una activa).
+Domingos a las 09:00, hora de Lima. Próxima ejecución tras la activación:
+15 de noviembre de 2026 a las 09:00 (America/Lima).
 
-La opción `--no-backend` fuerza backend_enabled=False después de cargar el
-.env. No envía snapshots ni drena pendientes SQLite, aunque el .env diga
-BACKEND_ENABLED=true. No modifica .env ni estados pendientes. El colector sí
-consulta GMP y mantiene el filtro de altas/críticas. La SQLite de producción
-queda reservada para cuando se autorice la entrega.
+El launcher de producción calcula la raíz, usa `.venv/bin/python` y ejecuta
+`main.py --env-file RUTA/.env --once`. El .env del servidor tiene:
 
-Salida del cron: `cloud_audit_log/cron.log`. El log de aplicación conserva su
-configuración en .env. Los JSON quedan en el PAYLOAD_DIR configurado
-(predeterminado `runtime/openvas/artifacts/`), incluyendo
-`snapshot_request_latest.json`, `prepared_backend_latest.json`,
-`filtered_latest.json` y `run_latest.meta.json`.
+```dotenv
+BACKEND_ENABLED=true
+BACKEND_LOCAL=Mi Fibra
+BACKEND_TIMEOUT=180
+BACKEND_TLS_VERIFY=true
+BACKEND_CA_BUNDLE=runtime/openvas/certs/backend-ca.pem
+```
 
-Diferencias respecto del cron de Insight:
+El PEM privado del despliegue y .env no se suben a Git. El certificado debe
+revisarse/renovarse al cambiar en el receptor o antes de su vencimiento.
+El ejemplo .env.example conserva BACKEND_ENABLED=false: un clon nuevo requiere
+habilitación explícita. No se activa el envío en la laptop por este cambio.
 
-- Se utiliza `.venv` de OpenVAS, no el `venv` de Insight.
-- Se fuerza `--no-backend` para garantizar la fase sin envío.
-- No se pasa `--no-persist-payloads`: OpenVAS conserva los JSON para revisión
-  y no admite esa opción en su CLI.
-- Se añade un bloqueo para evitar solapamientos del cron de OpenVAS.
+Los snapshots completos solo se encolan cuando hay cambios de contenido;
+los pendientes se reintentan en FIFO con su mismo ID y JSON. Si GMP falla o
+la captura es parcial, no se crea una foto incompleta, pero sí se pueden
+reintentar snapshots completos pendientes. Si no cambia nada y no hay pendientes,
+la corrida no hace POST. Ver [DELIVERY.md](DELIVERY.md).
 
-El bloqueo no coordina Insight y OpenVAS: son proyectos independientes y ambos
-conservan el horario solicitado. No se deshabilita ni sustituye el cron de Insight.
+Logs del cron: `cloud_audit_log/cron.log`; logs de aplicación según .env.
+JSON de revisión: `runtime/openvas/artifacts/`, incluidos snapshot_request_latest.json,
+prepared_backend_latest.json, filtered_latest.json y run_latest.meta.json.
+Estado persistente: runtime/openvas/delivery.sqlite3, creado al ejecutar el emisor.
+Los archivos *_latest se sobrescriben; no se descargan copias a la laptop.
+
+Ambos launchers comparten el bloqueo runtime/openvas/weekly_validation.lock
+para impedir solapamiento (salida 75 si está ocupado), y usan umask 077.
+`scripts/run_weekly_validation.sh` conserva --no-backend como entrada manual
+sin envío; ya no es el comando del cron. Puede usarse para revisar la
+recolección sin enviar ni drenar pendientes aunque .env habilite el backend.
+
+La entrada original de Insight se conserva comentada en el crontab y hay
+respaldo privado del crontab y .env previos en el servidor. Para suspender
+OpenVAS se debe comentar su entrada; BACKEND_ENABLED=false detiene POST y
+reintentos, pero conserva la recolección si se mantiene el cron.
 
 ## Revisión del receptor
 
@@ -62,10 +77,6 @@ recepción de 1.258 alarmas y el rechazo de las mismas llaves repetidas. El
 receptor exige IDs ISO UTC; rechazó UUID. La atomicidad ante fallos parciales,
 la separación por origen y los cierres permanecen sin confirmar. No hubo
 pruebas de cierres ni acceso al PHP o su BD.
-
-El wrapper es intencionalmente de recolección sin envío. Habilitar entrega
-requerirá una modificación explícita del cron/launcher después de validar el
-receptor; cambiar solo BACKEND_ENABLED en .env no activará los POST de este cron.
 
 ## Identidad del cliente
 

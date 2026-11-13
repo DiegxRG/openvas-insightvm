@@ -245,8 +245,13 @@ Revisar comparison.json y capture_metrics.json antes de ampliar a las demás tar
 
 Para el flujo actual de entrega completa, reintentos, migración SQLite y controles, ver [docs/DELIVERY.md](docs/DELIVERY.md). Al actualizar instalaciones existentes, fijar BACKEND_ALARM_TYPE=Alarma de seguridad de OpenVAS x TXDXSecure en su .env; Git no modifica ese archivo privado.
 
-## Cron semanal sin envío
+## Cron semanal
 
-El cron de OpenVAS utiliza el usuario desarrollo-xoc y ejecuta domingos a las 09:00 (America/Lima), como Insight. El wrapper scripts/run_weekly_validation.sh fuerza --once --no-backend y conserva los JSON de revisión. No envía ni reintenta pendientes aunque el .env habilite el backend. Ver [instalación, rutas y alcance de la revisión del receptor](docs/CRON.md).
+OpenVAS está programado con el usuario desarrollo-xoc para domingos a las 09:00
+(America/Lima), usando scripts/run_weekly_delivery.sh y BACKEND_ENABLED=true en
+el .env del servidor. La entrada de INSIGHT-MIFIBRA se dejó comentada por
+licencias, según instrucción del usuario. MAD conserva su programación.
+El launcher run_weekly_validation.sh sigue disponible para pruebas sin envío.
+Ver [configuración y controles](docs/CRON.md).
 
-La [prueba autorizada del endpoint real](docs/validation/2026-11-13-endpoint/README.md) confirmó 1.258 registros y el rechazo de la repetición idéntica por llave compuesta. Se corrigieron IDs ISO UTC, ACK de repetición, timeout y confianza TLS configurable. El cron continúa sin envío. No hay descargas automáticas a la laptop por POST; ver [retención de artefactos](docs/DELIVERY.md).
+La [prueba autorizada del endpoint real](docs/validation/2026-11-13-endpoint/README.md) confirmó 1.258 registros y el rechazo de la repetición idéntica por llave compuesta. Se corrigieron IDs ISO UTC, ACK de repetición, timeout y confianza TLS configurable. La prueba mantuvo el cron sin envío; después se autorizó el cron de producción descrito arriba. No hay descargas automáticas a la laptop por POST; ver [retención de artefactos](docs/DELIVERY.md).
