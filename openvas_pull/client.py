@@ -1,4 +1,5 @@
 import socket
+import time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -23,9 +24,12 @@ def parse_xml(data):
 
 
 class OpenVASClient:
+    enforce_remote_filter = True
+
     def __init__(self, settings):
         self.settings = settings
         self.sock = None
+        self.last_request_stats = {}
 
     def __enter__(self):
         try:
@@ -56,9 +60,18 @@ class OpenVASClient:
         parser = ET.XMLPullParser(events=('start', 'end'))
         depth = 0
         complete = False
+        started = time.monotonic()
+        deadline = started + self.settings.gvm_request_timeout
+        declaration_tail = b''
+        root = None
         try:
+            self.sock.settimeout(min(self.settings.gvm_timeout, self.settings.gvm_request_timeout))
             self.sock.sendall(command.encode('utf-8'))
             while not complete:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OpenVASRequestError(f'Se alcanzo GVM_REQUEST_TIMEOUT={self.settings.gvm_request_timeout}s', retryable=True)
+                self.sock.settimeout(min(self.settings.gvm_timeout, remaining))
                 chunk = self.sock.recv(65536)
                 if not chunk:
                     raise OpenVASRequestError('GMP cerró una respuesta incompleta', retryable=True)
@@ -68,14 +81,18 @@ class OpenVASClient:
                         f'Respuesta GMP de al menos {len(data)} bytes supera '
                         f'OPENVAS_REPORT_MAX_KB={self.settings.report_max_kb}'
                     )
-                if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
+                declaration_scan = (declaration_tail + chunk).upper()
+                if b'<!DOCTYPE' in declaration_scan or b'<!ENTITY' in declaration_scan:
                     raise OpenVASRequestError('Declaraciones XML no admitidas')
+                declaration_tail = (declaration_tail + chunk)[-10:]
                 parser.feed(chunk)
                 # Python 3.13 defers Expat reparsing of fragmented tokens.
                 # Flush so a self-closing reply is recognized without another recv.
                 if hasattr(parser, 'flush'):
                     parser.flush()
-                for event, _ in parser.read_events():
+                for event, element in parser.read_events():
+                    if event == 'start' and depth == 0:
+                        root = element
                     depth += 1 if event == 'start' else -1
                     if event == 'end' and depth == 0:
                         complete = True
@@ -87,7 +104,10 @@ class OpenVASClient:
             ) from exc
         except ET.ParseError as exc:
             raise OpenVASRequestError('Respuesta GMP con XML inválido') from exc
-        root = parse_xml(bytes(data))
+        # Reuse the incrementally parsed tree instead of parsing the full XML again.
+        for node in root.iter():
+            node.tag = node.tag.rsplit('}', 1)[-1]
+        self.last_request_stats = {'response_bytes': len(data), 'duration_seconds': round(time.monotonic() - started, 6)}
         if root.get('status') != '200':
             # Do not include response bodies or authentication commands in logs.
             raise OpenVASRequestError('GMP rechazó la solicitud: status=' + str(root.get('status')))
@@ -97,6 +117,20 @@ class OpenVASClient:
         return self.request(f'<get_tasks details="1" filter="first={first} rows={rows} sort=uuid"/>')
 
     def get_report(self, report_id, first, rows):
-        # Filter locally: Greenbone versions differ in their named severity levels.
-        return self.request(f'<get_reports report_id={quoteattr(report_id)} details="1" '
-                            f'filter="first={first} rows={rows} sort=uuid levels=hmlg overrides=1"/>')
+        # Numeric filters avoid version-specific names for critical severity.
+        # GMP scores have one decimal; >6.9 includes 7.0 through 10.0.
+        allowed = set(self.settings.severities)
+        if allowed == {'critical'}:
+            severity_filter = 'severity>8.9 severity<10.1'
+        elif allowed == {'high'}:
+            severity_filter = 'severity>6.9 severity<9.0'
+        elif allowed == {'critical', 'high'}:
+            severity_filter = 'severity>6.9 severity<10.1'
+        else:
+            raise ValueError('Solo se admiten severidades high y critical')
+        filter_text = f'first={first} rows={rows} sort=uuid {severity_filter} apply_overrides=1 notes=0 overrides=0'
+        response = self.request(f'<get_reports report_id={quoteattr(report_id)} details="1" '
+                                f'lean="{int(self.settings.gvm_lean_report)}" ignore_pagination="0" '
+                                f'filter={quoteattr(filter_text)}/>')
+        self.last_request_stats['result_filter'] = filter_text
+        return response

@@ -127,6 +127,12 @@ Después de validar los datos, `BACKEND_ENABLED=true` habilita POST individuales
 
 Extrae IP, hostname cuando existe, OID del NVT, título, severidad numérica/CVSS, CVEs y fecha operativa. La evidencia local conserva también tarea, reporte y puerto. Solo acepta altas (7.0 <= CVSS < 9.0) y críticas (9.0 <= CVSS <= 10.0).
 
+El filtro se envía a GMP antes de transferir los resultados: para ambas severidades se solicita `severity>6.9 severity<10.1` en el atributo `filter` de `get_reports`, junto con `first`, `rows` y `ignore_pagination=0`. No se usa `levels=hmlg`, que descargaba también Medium/Low/Log y filtraba después. Se mantiene la validación local. Si una respuesta GMP contiene severidades fuera de las solicitadas, scores inválidos o más resultados que `rows`, se rechaza la captura en lugar de continuar descargando datos ajenos al filtro. No se hace un segundo intento sin filtro.
+
+`GVM_LEAN_REPORT=true` pide XML reducido conservando los resultados detallados. `GVM_TIMEOUT=120` permite hasta 120 segundos de espera de conexión/inactividad; `GVM_REQUEST_TIMEOUT=600` establece un máximo de 600 segundos por solicitud/página. Este último no es un límite para toda la captura de 47 tareas. Los límites de tamaño permanecen en 30 MiB por respuesta/XML y 64 MiB de tráfico por reporte. Actualizar estas variables también en el .env de instalaciones existentes.
+
+`capture_metrics.json` registra el filtro solicitado, severidades efectivamente recibidas, duración y bytes por página, además de los límites de consulta. Permite distinguir demora de GMP, exceso de metadata y una respuesta que ignore el filtro.
+
 El backend recibe estas 13 claves, como INSIGHT:
 
 | Campo | Valor/origen |
@@ -185,6 +191,14 @@ python tools/compare_metadata.py
 ```
 
 Los XML sintéticos producen una alarma Critical y otra High, descartando Medium/Low/Info. Resultados: validation/metadata/. La referencia incluida procede de la prueba test_backend_prepare_filtered_findings_includes_extended_fields de INSIGHT-MIFIBRA; no es una captura productiva.
+
+La suite incluye un servicio GMP simulado en `127.0.0.1`, con credenciales ficticias y POST al backend bloqueados durante la prueba. Requiere permiso para conexiones loopback; no contacta OpenVAS ni SSH. Para ejecutar únicamente esa prueba:
+
+```bash
+python -m pytest tests/test_controlled_gmp.py -q
+```
+
+La comparación entre descarga anterior y filtrada queda en `validation/local_controlled/summary.json`. Los tiempos de ese servicio sintético no predicen tiempos de Nexus. Ver [el informe local](docs/validation/2026-11-13-local/README.md).
 
 Opcionalmente, con el proyecto original disponible, comparar además con su constructor real:
 

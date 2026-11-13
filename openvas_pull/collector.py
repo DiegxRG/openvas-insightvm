@@ -39,6 +39,19 @@ class OpenVASCollector:
             total_results += len(nodes)
             stat = {'context': context, 'page': page + 1, 'page_bytes': page_bytes,
                     'transfer_bytes': total_bytes, 'page_results': len(nodes), 'results_fetched': total_results}
+            if tag == 'results/result':
+                buckets = {}
+                for node in nodes:
+                    try:
+                        score = float(node.findtext('severity', ''))
+                        label = normalize_severity(score) if math.isfinite(score) and 0 <= score <= 10 else 'unknown'
+                    except ValueError:
+                        label = 'unknown'
+                    buckets[label] = buckets.get(label, 0) + 1
+                stat['received_severities'] = buckets
+            stat['request_seconds'] = getattr(self.client, 'last_request_stats', {}).get('duration_seconds')
+            if getattr(self.client, 'last_request_stats', {}).get('result_filter'):
+                stat['requested_filter'] = self.client.last_request_stats['result_filter']
             self.pagination_stats.append(stat)
             logging.getLogger(__name__).info('pagination=%s', stat)
             if page_bytes > self.client.settings.report_max_kb * 1024:
@@ -47,6 +60,12 @@ class OpenVASCollector:
             if total_bytes > self.client.settings.pagination_max_kb * 1024:
                 raise ValueError(f'{context}, pagina={page + 1}: trafico acumulado de {total_bytes} bytes supera '
                                  f'OPENVAS_PAGINATION_MAX_KB={self.client.settings.pagination_max_kb}')
+            if len(nodes) > page_size:
+                raise OpenVASRequestError(f'{context}, pagina={page + 1}: GMP no respeto rows={page_size}; recibidos={len(nodes)}')
+            if tag == 'results/result' and getattr(self.client, 'enforce_remote_filter', False):
+                unexpected = set(stat['received_severities']) - set(self.client.settings.severities)
+                if unexpected:
+                    raise OpenVASRequestError(f'{context}, pagina={page + 1}: GMP devolvio severidades fuera del filtro: {sorted(unexpected)}')
             signature = tuple(node.get('id') or ET_signature(node) for node in nodes)
             if nodes and signature in seen:
                 raise ValueError(f'{context}, pagina={page + 1}: GMP repitió una página; captura incompleta')

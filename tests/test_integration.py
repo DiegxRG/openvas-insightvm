@@ -93,6 +93,7 @@ def test_xml_namespaces_and_entities():
 def test_fragmented_and_selfclosing_response():
     class Socket:
         def __init__(self): self.chunks = iter([b'<get_version_response sta', b'tus="200"/>'])
+        def settimeout(self, timeout): pass
         def sendall(self, command): pass
         def recv(self, size): return next(self.chunks, b'')
     client = OpenVASClient(settings())

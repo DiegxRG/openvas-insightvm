@@ -98,6 +98,10 @@ def capture_live(env_file, output, *, settings=None):
     collector = OpenVASCollector(OpenVASClient(settings))
     metrics = {'response_and_combined_limit_kib': settings.report_max_kb,
                'pagination_transfer_limit_kib': settings.pagination_max_kb,
+               'socket_inactivity_timeout_seconds': settings.gvm_timeout,
+               'request_deadline_seconds': settings.gvm_request_timeout,
+               'requested_severities': list(settings.severities),
+               'lean_report': settings.gvm_lean_report,
                'files': [], 'complete': False}
     output.mkdir(parents=True, exist_ok=True)
 
