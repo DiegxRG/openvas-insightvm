@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+from backend_fixtures import AcceptedSnapshot
 from openvas_pull.backend_client import BackendAlarmClient
 from openvas_pull.config import Settings
 from openvas_pull.delivery import scope_key, sender_lock
@@ -38,14 +39,11 @@ def prepared(n=1):
 
 def client(cfg, calls, reply=None):
     result = BackendAlarmClient(cfg)
-    class Response:
-        status_code = 200
-        def json(self): return {'success': True}
     def post(url, **kwargs):
         calls.append(kwargs['json'])
         if reply:
             return reply(kwargs['json'])
-        return Response()
+        return AcceptedSnapshot(kwargs['json'])
     result.session.post = post
     return result
 
@@ -104,13 +102,16 @@ def test_conflict_does_not_ack_a_change_and_preserves_fifo(cfg, clock):
         status_code = 409
         def json(self): return {'success': False, 'message': 'Ya existe un registro activo'}
     first = client(cfg, calls, lambda _: Conflict()).send_prepared_alarms(p)
-    assert first['conflicts'] == 1 and first['pending_total'] == 1
+    assert first['conflicts'] == 1 and first['review_total'] == 1
     p['alarms'][0]['cvss_score'] = 10.0
     queued = client(cfg, calls).send_prepared_alarms(p)
-    assert queued['queued']['changed'] == 1 and queued['pending_total'] == 2
+    assert queued['queued']['changed'] == 1 and queued['pending_total'] == 1
     assert queued['attempted'] == 0  # Never overwrite a newer change with an older retry.
     clock[0] += 2
-    done = client(cfg, calls).send_prepared_alarms(prepared(0), complete_snapshot=False)
+    assert client(cfg, calls).retry_pending()['attempted'] == 0
+    subprocess.check_call([sys.executable, 'tools/delivery_state.py', '--db', cfg.delivery_state_path,
+                           'retry-review', '--scope', scope_key(cfg), '--snapshot-id', calls[0]['snapshot_id']])
+    done = client(cfg, calls).retry_pending()
     assert done['sent_ok'] == 2 and done['pending_total'] == 0
     assert [a['alarms'][0]['cvss_score'] for a in calls[-2:]] == [9.8, 10.0]
 
@@ -189,13 +190,10 @@ def test_corrupt_state_fails_closed(cfg):
 
 def test_concurrent_senders_cannot_both_post(cfg):
     started = threading.Event(); release = threading.Event(); calls = []; output = []
-    def blocking(_):
+    def blocking(payload):
         started.set()
         assert release.wait(10)
-        class OK:
-            status_code = 200
-            def json(self): return {'success': True}
-        return OK()
+        return AcceptedSnapshot(payload)
     thread = threading.Thread(target=lambda: output.append(client(cfg, calls, blocking).send_prepared_alarms(prepared())))
     thread.start()
     try:
@@ -233,7 +231,7 @@ def test_pending_outbox_drains_even_if_collector_is_down(cfg, tmp_path, clock):
     from unittest.mock import patch
     def post(self, alarm):
         calls.append(alarm)
-        return {'success': True, 'http_status': 200}
+        return {**AcceptedSnapshot(alarm).json(), 'http_status': 200}
     with patch.object(BackendAlarmClient, '_post_snapshot', post):
         assert run_service(replace(cfg, payload_dir=str(tmp_path/'payloads')), Down(), once=True) is False
     with sqlite3.connect(cfg.delivery_state_path) as db:
@@ -249,7 +247,7 @@ def test_partial_snapshot_never_enqueues_or_changes_checkpoint(cfg):
     assert len(calls) == 1 and len(calls[0]['alarms']) == 2
 
 
-def test_uncertain_ack_is_retried_instead_of_losing_alarm(cfg, monkeypatch):
+def test_uncertain_ack_is_retried_instead_of_losing_alarm(cfg, monkeypatch, clock):
     from openvas_pull.delivery import Outbox
     original = Outbox.acknowledge
     def broken_ack(*args): raise OSError('simulated disk failure after HTTP success')
@@ -257,6 +255,8 @@ def test_uncertain_ack_is_retried_instead_of_losing_alarm(cfg, monkeypatch):
     monkeypatch.setattr(Outbox, 'acknowledge', broken_ack)
     assert client(cfg, calls).send_prepared_alarms(prepared())['backend_errors'] == 1
     monkeypatch.setattr(Outbox, 'acknowledge', original)
+    assert client(cfg, calls).retry_pending()['attempted'] == 0
+    clock[0] += 2
     assert client(cfg, calls).send_prepared_alarms(prepared())['sent_ok'] == 1
     assert len(calls) == 2  # HTTP + SQLite cannot be committed atomically together.
 
@@ -318,7 +318,9 @@ def test_ack_survives_a_real_process_restart(cfg, tmp_path):
 from openvas_pull.config import Settings
 from openvas_pull.backend_client import BackendAlarmClient
 c=BackendAlarmClient(Settings(gvm_host='offline',gvm_port=1,gvm_user='dummy',gvm_password='dummy',backend_enabled=True,delivery_state_path=sys.argv[1]))
-c._post_snapshot=lambda alarm: {'success':True,'http_status':200}
+c._post_snapshot=lambda payload: {'success':True,'http_status':200,'data':{
+    'snapshot_id':payload['snapshot_id'],'total_alarmas':len(payload['alarms']),
+    'registros_exitosos':len(payload['alarms'])}}
 r=c.send_prepared_alarms(json.load(open(sys.argv[2])))
 print(json.dumps({'attempted':r['attempted'],'pending':r['pending_total']}))
 '''
@@ -354,7 +356,7 @@ def test_legacy_acked_migration_keeps_audit_and_sends_first_full_snapshot(cfg):
     assert client(cfg,calls).send_prepared_alarms(prepared(3))['snapshots_sent']==1
     with sqlite3.connect(cfg.delivery_state_path) as db:
         assert db.execute('SELECT payload FROM events').fetchone()[0]=='audit'
-        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==3
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
 
 
 def test_complete_snapshots_100_to_105_to_70_include_all_remaining(cfg):
@@ -421,7 +423,7 @@ def test_acknowledged_uuid_schema2_migrates_without_erasing_history(cfg):
         db.execute("UPDATE snapshot_events SET snapshot_id='legacy-uuid'")
     assert client(cfg,calls).send_prepared_alarms(prepared())['attempted']==0
     with sqlite3.connect(cfg.delivery_state_path) as db:
-        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==3
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
         assert db.execute('SELECT snapshot_id FROM snapshot_events').fetchone()[0]=='legacy-uuid'
 
 
@@ -450,7 +452,7 @@ def test_exact_replay_receipt_acknowledges_lost_success_response(cfg,clock):
 
 
 @pytest.mark.parametrize('case',['snapshot','missing','extra','other_error','repeated_key','http500'])
-def test_incomplete_or_unrelated_duplicate_receipts_stay_pending(cfg,case):
+def test_incomplete_or_unrelated_duplicate_receipts_are_not_acknowledged(cfg,case):
     class Reply:
         status_code=500 if case=='http500' else 200
         def __init__(self,payload):self.payload=payload
@@ -463,18 +465,18 @@ def test_incomplete_or_unrelated_duplicate_receipts_stay_pending(cfg,case):
             if case=='repeated_key':data['data']['errores'][1]=data['data']['errores'][0]
             return data
     r=client(cfg,[],lambda p:Reply(p)).send_prepared_alarms(prepared(3))
-    assert r['pending_total']==1 and r['sent_ok']==0 and r['replayed_snapshots']==0
+    assert r['pending_total'] == (case == 'http500')
+    assert r['review_total'] == (case != 'http500')
+    assert r['sent_ok'] == 0 and r['replayed_snapshots'] == 0
 
 
 def test_backend_uses_explicit_trust_bundle_without_disabling_tls(cfg,tmp_path):
     trust=tmp_path/'backend.pem';trust.write_text('test trust file; transport mocked')
     c=BackendAlarmClient(replace(cfg,backend_ca_bundle=str(trust),backend_timeout=180))
-    class OK:
-        status_code=200
-        def json(self):return {'success':True}
     def post(url,**kwargs):
         assert kwargs['verify']==str(trust) and kwargs['timeout']==180
-        return OK()
+        assert kwargs['allow_redirects'] is False
+        return AcceptedSnapshot(kwargs['json'])
     c.session.post=post
     assert c.send_prepared_alarms(prepared())['snapshots_sent']==1
 
@@ -484,7 +486,92 @@ def test_backend_cannot_self_assert_replay_without_matching_receipt(cfg):
         status_code=200
         def json(self):return {'success':False,'idempotent_replay_confirmed':True,'message':'unknown error'}
     r=client(cfg,[],lambda p:Bad()).send_prepared_alarms(prepared())
-    assert r['pending_total']==1 and r['sent_ok']==0
+    assert r['review_total']==1 and r['sent_ok']==0
+
+
+@pytest.mark.parametrize('status_code', [200, 422, 503])
+def test_partial_receipt_or_permanent_rejection_goes_to_review(cfg, clock, status_code):
+    class Reply(AcceptedSnapshot):
+        def json(self):
+            body = super().json()
+            body['success'] = status_code == 200
+            body['data']['registros_exitosos'] = 1 if status_code != 422 else 0
+            return body
+
+    calls = []
+
+    def reply(payload):
+        response = Reply(payload)
+        response.status_code = status_code
+        return response
+
+    result = client(cfg, calls, reply).send_prepared_alarms(prepared(2))
+    assert result['sent_ok'] == 0 and result['review_total'] == 1 and result['pending_total'] == 0
+    clock[0] += 100
+    assert client(cfg, calls).retry_pending()['attempted'] == 0
+    assert len(calls) == 1
+
+
+def test_transient_failures_stop_after_three_attempts_across_restarts(cfg, clock):
+    class Unavailable:
+        status_code = 503
+
+        def json(self):
+            return {'success': False}
+
+    calls = []
+    first = client(cfg, calls, lambda _: Unavailable()).send_prepared_alarms(prepared(2))
+    assert first['pending_total'] == 1
+    clock[0] += 1
+    second = client(cfg, calls, lambda _: Unavailable()).retry_pending()
+    assert second['pending_total'] == 1
+    clock[0] += 2
+    third = client(cfg, calls, lambda _: Unavailable()).retry_pending()
+    assert third['new_reviews'] == 1 and third['pending_total'] == 0
+    clock[0] += 100
+    assert client(cfg, calls).retry_pending()['attempted'] == 0
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        assert db.execute('SELECT status,attempts FROM snapshot_events').fetchone() == ('review', 3)
+
+
+def test_exhausted_legacy_pending_enters_review_without_post(cfg, clock):
+    def timeout(_):
+        raise TimeoutError('simulated timeout')
+
+    calls = []
+    client(cfg, calls, timeout).send_prepared_alarms(prepared())
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        db.execute('UPDATE schema_version SET version=3')
+        db.execute("UPDATE snapshot_events SET attempts=9 WHERE status='pending'")
+    result = client(cfg, calls).retry_pending()
+    assert result['new_reviews'] == 1 and result['attempted'] == 0
+    assert len(calls) == 1
+    with sqlite3.connect(cfg.delivery_state_path) as db:
+        assert db.execute('SELECT status,attempts FROM snapshot_events').fetchone() == ('review', 9)
+
+
+def test_review_can_be_retried_once_then_reconciled_by_operator(cfg, clock):
+    class Rejected:
+        status_code = 422
+
+        def json(self):
+            return {'success': False}
+
+    calls = []
+    client(cfg, calls, lambda _: Rejected()).send_prepared_alarms(prepared())
+    command = [sys.executable, 'tools/delivery_state.py', '--db', cfg.delivery_state_path]
+    args = ['--scope', scope_key(cfg), '--snapshot-id', calls[0]['snapshot_id']]
+    subprocess.check_call([*command, 'retry-review', *args])
+    def timeout(_):
+        raise TimeoutError('simulated timeout')
+
+    assert client(cfg, calls, timeout).retry_pending()['new_reviews'] == 1
+    clock[0] += 100
+    assert client(cfg, calls).retry_pending()['attempted'] == 0
+    assert len(calls) == 2 and calls[0] == calls[1]
+    subprocess.check_call([*command, 'ack-review', *args])
+    assert client(cfg, calls).retry_pending()['review_total'] == 0
 
 
 def test_pending_only_no_database_is_idle_without_creating_state(cfg):

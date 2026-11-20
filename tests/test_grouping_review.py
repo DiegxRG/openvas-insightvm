@@ -2,6 +2,7 @@ from dataclasses import replace
 import xml.etree.ElementTree as ET
 import pytest
 
+from backend_fixtures import AcceptedSnapshot
 from openvas_pull.collector import OpenVASCollector
 from openvas_pull.backend_client import BackendAlarmClient
 from openvas_pull.config import Settings
@@ -57,12 +58,9 @@ def test_group_identity_is_stable_on_replay_but_client_resends_without_backend_d
     prepared = client.prepare_filtered_findings(payload, snapshot_id='fixed')
     assert prepared == client.prepare_filtered_findings(second, snapshot_id='fixed')
     calls = []
-    class Response:
-        status_code = 200
-        def json(self): return {'success': True}
     def post(url, **kwargs):
         calls.append(kwargs['json']['alarms'][0]['finding_id'])
-        return Response()
+        return AcceptedSnapshot(kwargs['json'])
     client.session.post = post
     assert client.send_prepared_alarms(prepared)['sent_ok'] == 1
     assert client.send_prepared_alarms(prepared)['sent_ok'] == 1
@@ -75,12 +73,11 @@ def test_client_classifies_backend_conflict_without_claiming_local_suppression(t
     seen = set()
     class Response:
         status_code = 200
-        def __init__(self, duplicate): self.duplicate = duplicate
         def json(self):
-            return {'success': False, 'message': 'Ya existe un registro activo'} if self.duplicate else {'success': True}
+            return {'success': False, 'message': 'Ya existe un registro activo'}
     def post(url, **kwargs):
         identity = kwargs['json']['alarms'][0]['finding_id']
-        response = Response(identity in seen)
+        response = Response() if identity in seen else AcceptedSnapshot(kwargs['json'])
         seen.add(identity)
         return response
     client.session.post = post

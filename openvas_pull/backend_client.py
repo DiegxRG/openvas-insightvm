@@ -153,10 +153,15 @@ class BackendAlarmClient:
                 timeout=self.settings.backend_timeout,
                 verify=self.settings.backend_ca_bundle or self.settings.backend_verify_ssl,
                 headers={"Content-Type": "application/json"},
+                allow_redirects=False,
             )
         except Exception as exc:
             log.error("Backend connection error: %s", exc)
-            return {"success": False, "message": f"Connection error: {exc}", "snapshot_id": snapshot_payload["snapshot_id"]}
+            retryable = isinstance(exc, (requests.Timeout, TimeoutError, requests.ConnectionError))
+            if isinstance(exc, (requests.exceptions.SSLError, requests.exceptions.ProxyError)):
+                retryable = False
+            return {"success": False, "retryable": retryable, "message": f"Connection error: {exc}",
+                    "snapshot_id": snapshot_payload["snapshot_id"]}
 
         try:
             data = response.json()
@@ -168,6 +173,7 @@ class BackendAlarmClient:
 
         data["http_status"] = response.status_code
         data["snapshot_id"] = snapshot_payload["snapshot_id"]
+        data["retryable"] = response.status_code in {408, 429, 500, 502, 503, 504}
         data.pop('idempotent_replay_confirmed', None)
         if 200 <= response.status_code < 300 and _confirmed_duplicate_snapshot(data, snapshot_payload):
             # Preserve the backend's success=false; the outbox may acknowledge this exact replay.
@@ -203,6 +209,8 @@ def _confirmed_duplicate_snapshot(response, payload):
     sid = payload['snapshot_id']
     errors = data.get('errores')
     if data.get('snapshot_id') != sid or data.get('total_alarmas') != len(alarms):
+        return False
+    if data.get('registros_exitosos', 0) != 0:
         return False
     if not isinstance(errors, list) or len(errors) != len(expected):
         return False

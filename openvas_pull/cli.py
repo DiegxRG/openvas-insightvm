@@ -32,13 +32,14 @@ def main():
     if args.retry_pending:
         setup_logging(settings.log_level, str(Path(settings.log_file).with_name('retry.log')))
         result = BackendAlarmClient(settings).retry_pending()
-        if result.get('attempted') or result.get('backend_errors') or result.get('conflicts'):
-            logging.getLogger(__name__).info('Pending retry attempted=%s sent_ok=%s pending=%s errors=%s replays=%s',
-                result.get('attempted', 0), result.get('sent_ok', 0), result.get('pending_total'),
-                result.get('backend_errors', 0), result.get('replayed_snapshots', 0))
+        new_reviews = result.get('new_reviews', 0)
+        if result.get('attempted') or result.get('backend_errors') or result.get('conflicts') or new_reviews:
+            logging.getLogger(__name__).info('Pending retry attempted=%s sent_ok=%s pending=%s review=%s errors=%s replays=%s',
+                result.get('attempted', 0), result.get('sent_ok', 0), result.get('pending_total', 0),
+                result.get('review_total', 0), result.get('backend_errors', 0), result.get('replayed_snapshots', 0))
             write_json(Path(settings.payload_dir)/'retry_latest.meta.json',
                        {'started_at': datetime.now(timezone.utc).isoformat(), 'backend': result})
-        if result.get('backend_errors') or result.get('conflicts'):
+        if result.get('backend_errors') or result.get('conflicts') or new_reviews:
             raise SystemExit(1)
         return
     setup_logging(settings.log_level, settings.log_file)

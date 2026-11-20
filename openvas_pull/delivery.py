@@ -2,11 +2,30 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
 import time
 from openvas_pull.snapshots import build_snapshot_id, valid_snapshot_id
+
+MAX_DELIVERY_ATTEMPTS = 3
+log = logging.getLogger(__name__)
+
+
+def confirmed_receipt(response, payload):
+    if not 200 <= response.get('http_status', 0) < 300:
+        return False
+    if response.get('idempotent_replay_confirmed') is True:
+        return True
+    data = response.get('data')
+    if response.get('success') is not True or not isinstance(data, dict):
+        return False
+    expected = len(payload['alarms'])
+    return (data.get('snapshot_id') == payload['snapshot_id']
+            and all(type(data.get(key)) is int and data[key] == expected
+                    for key in ('total_alarmas', 'registros_exitosos'))
+            and data.get('errores') in (None, []))
 
 
 def canonical(value):
@@ -84,7 +103,7 @@ class Outbox:
             self.db.execute('PRAGMA synchronous=FULL')
             self.db.execute('CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)')
             versions = self.db.execute('SELECT version FROM schema_version').fetchall()
-            if versions and (len(versions) != 1 or versions[0][0] not in (1, 2, 3)):
+            if versions and (len(versions) != 1 or versions[0][0] not in (1, 2, 3, 4)):
                 raise ValueError('Unsupported delivery database schema')
             if versions and versions[0][0] == 1:
                 if self.db.execute("SELECT count(*) FROM events WHERE status='pending'").fetchone()[0]:
@@ -110,9 +129,10 @@ class Outbox:
                     SELECT scope,MAX(CAST(strftime('%s',snapshot_id) AS INTEGER)) FROM snapshot_events
                     WHERE strftime('%s',snapshot_id) IS NOT NULL GROUP BY scope;
             """)
-            with self.db:
-                self.db.execute('DELETE FROM schema_version')
-                self.db.execute('INSERT INTO schema_version VALUES(3)')
+            if not versions or versions[0][0] != 4:
+                with self.db:
+                    self.db.execute('DELETE FROM schema_version')
+                    self.db.execute('INSERT INTO schema_version VALUES(4)')
         except BaseException:
             self.db.close()
             raise
@@ -154,22 +174,32 @@ class Outbox:
                 started_at=excluded.started_at,force_next=0""", (scope, digest, snapshot_started_at))
             return {**counts, 'changed' if previous else 'new': 1, 'snapshot_id': snapshot_id}
 
-    def due(self, scope, now, size):
-        # One global FIFO per scope: older retries cannot overwrite newer snapshots.
-        head = self.db.execute("""SELECT * FROM snapshot_events WHERE scope=? AND status='pending'
-            ORDER BY id LIMIT 1""", (scope,)).fetchone()
-        return [head] if head is not None and head['next_attempt'] <= now else []
+    def head(self, scope):
+        # A snapshot under review keeps its place until the receiver is reconciled.
+        return self.db.execute("""SELECT * FROM snapshot_events
+            WHERE scope=? AND status IN ('pending', 'review', 'retry_once') ORDER BY id LIMIT 1""",
+            (scope,)).fetchone()
 
     def acknowledge(self, identity, now):
         with self.db:
             self.db.execute("UPDATE snapshot_events SET status='acked',acked_at=?,last_error=NULL WHERE id=?", (now, identity))
 
-    def defer(self, event, now, settings, message):
+    def begin_attempt(self, event, now, settings):
+        # Reserve the attempt before HTTP. Process death cannot reset the budget.
         delay = min(settings.delivery_retry_max_seconds,
                     settings.delivery_retry_seconds * 2 ** min(event['attempts'], 20))
+        last = event['status'] == 'retry_once' or event['attempts'] + 1 >= MAX_DELIVERY_ATTEMPTS
+        status = 'review' if last else 'pending'
         with self.db:
-            self.db.execute('UPDATE snapshot_events SET attempts=attempts+1,next_attempt=?,last_error=? WHERE id=?',
-                            (now + delay, str(message)[:1000], event['id']))
+            self.db.execute("""UPDATE snapshot_events
+                SET status=?,attempts=attempts+1,next_attempt=?,last_error=? WHERE id=?""",
+                (status, now + delay, 'Delivery interrupted or outcome unknown', event['id']))
+        return status, delay
+
+    def record_failure(self, identity, status, message, next_attempt=0):
+        with self.db:
+            self.db.execute('UPDATE snapshot_events SET status=?,last_error=?,next_attempt=? WHERE id=?',
+                            (status, message, next_attempt, identity))
 
     def prune(self, scope, now, days):
         with self.db:
@@ -183,7 +213,7 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
     if retry_only and not path.exists():
         return {'enabled': True, 'retry_only': True, 'skipped': True, 'reason': 'no_database',
                 'attempted': 0, 'sent_ok': 0, 'snapshots_sent': 0, 'replayed_snapshots': 0,
-                'backend_errors': 0, 'conflicts': 0, 'pending_total': 0, 'details': []}
+                'backend_errors': 0, 'conflicts': 0, 'pending_total': 0, 'review_total': 0, 'details': []}
     path.parent.mkdir(parents=True, exist_ok=True)
     scope = scope_key(settings)
     with sender_lock(path.with_name(path.name + '.' + scope + '.lock')):
@@ -205,18 +235,27 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
                       'validation_errors': prepared.get('validation_errors', 0),
                       'sent_ok': 0, 'snapshots_sent': 0, 'replayed_snapshots': 0, 'conflicts': 0,
                       'backend_errors': 0 if complete or retry_only else 1,
-                      'queued': counts, 'attempted': 0, 'details': list(prepared.get('skipped_findings', []))}
+                      'queued': counts, 'attempted': 0, 'new_reviews': 0,
+                      'details': list(prepared.get('skipped_findings', []))}
             while True:
-                batch = store.due(scope, time.time(), settings.delivery_batch_size)
-                if not batch:
+                event = store.head(scope)
+                now = time.time()
+                if event is None or event['status'] == 'review':
                     break
-                event = batch[0]
+                if event['status'] == 'pending' and event['attempts'] >= MAX_DELIVERY_ATTEMPTS:
+                    reason = 'Automatic delivery budget already exhausted'
+                    store.record_failure(event['id'], 'review', reason)
+                    log.error('snapshot_id=%s requires review: %s', event['snapshot_id'], reason)
+                    result['new_reviews'] += 1
+                    break
+                if event['next_attempt'] > now:
+                    break
                 payload = json.loads(event['payload'])
+                attempt_status, delay = store.begin_attempt(event, now, settings)
                 response = client._post_snapshot(payload)
                 result['attempted'] += 1
                 result['details'].append(response)
-                status = response.get('http_status', 0)
-                if (response.get('success') is True or response.get('idempotent_replay_confirmed') is True) and 200 <= status < 300:
+                if confirmed_receipt(response, payload):
                     store.acknowledge(event['id'], time.time())
                     result['sent_ok'] += len(payload['alarms'])
                     result['snapshots_sent'] += 1
@@ -226,9 +265,28 @@ def deliver(client, prepared, *, findings=None, complete_snapshot=False, snapsho
                         result['conflicts'] += 1
                     else:
                         result['backend_errors'] += 1
-                    store.defer(event, time.time(), settings, response.get('message', 'Unconfirmed delivery'))
+                    receipt = response.get('data')
+                    accepted = receipt.get('registros_exitosos') if isinstance(receipt, dict) else None
+                    reported_acceptance = type(accepted) is int and accepted > 0
+                    retryable = response.get('retryable') is True and not reported_acceptance
+                    status = attempt_status if retryable else 'review'
+                    status_code = response.get('http_status', 0)
+                    if reported_acceptance or 200 <= status_code < 300:
+                        reason = f'HTTP {status_code}: invalid or incomplete receipt'
+                    elif status_code:
+                        reason = f'HTTP {status_code}: unconfirmed delivery'
+                    else:
+                        reason = 'Backend connection failed'
+                    next_attempt = time.time() + delay if status == 'pending' else 0
+                    store.record_failure(event['id'], status, reason, next_attempt)
+                    if status == 'review':
+                        log.error('snapshot_id=%s requires review: %s', event['snapshot_id'], reason)
+                        result['new_reviews'] += 1
                     break
-            result['pending_total'] = store.db.execute("SELECT count(*) FROM snapshot_events WHERE scope=? AND status='pending'", (scope,)).fetchone()[0]
+            statuses = dict(store.db.execute("""SELECT status,count(*) FROM snapshot_events
+                WHERE scope=? AND status IN ('pending', 'review', 'retry_once') GROUP BY status""", (scope,)))
+            result['pending_total'] = statuses.get('pending', 0) + statuses.get('retry_once', 0)
+            result['review_total'] = statuses.get('review', 0)
             store.prune(scope, time.time(), settings.delivery_ack_retention_days)
             return result
         finally:

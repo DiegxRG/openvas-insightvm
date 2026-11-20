@@ -62,17 +62,24 @@ el mismo segundo, asigna el siguiente segundo disponible. El reloj sobrevive
 la eliminación del historial confirmado; no se reutilizan IDs por esa poda.
 El ID identifica la captura, no sustituye fechaalarma de cada hallazgo.
 El ID y JSON se guardan antes del POST y son inmutables en todos los reintentos.
-Se exige HTTP 2xx y success=true para confirmar, o una respuesta de repetición estrictamente verificada. Conflictos, errores HTTP,
-timeouts y respuestas inválidas mantienen el snapshot pendiente con backoff
-exponencial (60 segundos a 3600 por defecto).
+Un recibo exitoso exige HTTP 2xx, success=true, el mismo snapshot_id y que
+total_alarmas y registros_exitosos coincidan con el número de alarmas enviadas.
+También se acepta un recibo de repetición completa verificado clave por clave.
 
-La cola es FIFO por ámbito completo. Si falla el primero, ninguno posterior
-puede adelantarlo. Cada POST incluye todo el snapshot, sin dividir sus alarmas
+Se permiten tres intentos automáticos por snapshot, incluido el inicial. Solo
+los timeouts, errores transitorios de conexión y HTTP 408, 429, 500, 502, 503 o
+504 se reintentan con backoff. Una respuesta parcial, un rechazo definitivo o
+el fin del presupuesto mueve el snapshot a `review`. SQLite guarda el número
+de intento antes de emitir el POST, incluso ante una interrupción del proceso.
+
+La cola es FIFO por ámbito completo. Un snapshot en revisión conserva su lugar
+hasta que el operador lo reconcilie con el receptor. Cada POST incluye todo el snapshot, sin dividir sus alarmas
 en lotes. DELIVERY_BATCH_SIZE se conserva por compatibilidad de configuración;
 no recorta el contenido ni permite adelantar snapshots.
 
 Solo se elimina historial confirmado después de DELIVERY_ACK_RETENTION_DAYS
-(90 por defecto); pendientes y checkpoint no expiran. Un timeout después de que
+(90 por defecto). Los pendientes, los snapshots en revisión y el checkpoint
+se conservan. Un timeout después de que
 el receptor haya guardado datos puede provocar reenvío: HTTP y SQLite no tienen
 una transacción compartida. La idempotencia final depende de que el backend use
 el mismo snapshot_id y su llave compuesta; no se promete entrega exactamente una
@@ -83,15 +90,16 @@ DELIVERY_DEDUP_ENABLED=false se conserva SQLite y FIFO, pero cada observación
 completa encola un snapshot aunque el contenido sea igual. No hay fallback de
 POST individual si SQLite falla.
 
-Los contadores attempted, snapshots_sent y pending_total cuentan snapshots;
+Los contadores attempted, snapshots_sent, pending_total y review_total cuentan snapshots;
 sent_ok suma las alarmas de los snapshots confirmados (puede ser 0 al confirmar
 un snapshot vacío). Un ciclo parcial se marca con backend_errors aunque pueda
 drenar pendientes correctamente.
 
 ## Actualización desde la cola anterior
 
-Se mantiene DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3. El esquema 3
-conserva snapshot_events y snapshot_checkpoints, y agrega snapshot_clocks. Las tablas de la versión 1 se
+Se mantiene DELIVERY_STATE_PATH=runtime/openvas/delivery.sqlite3. El esquema 4
+conserva snapshot_events, snapshot_checkpoints y snapshot_clocks. Los pendientes
+heredados conservan sus intentos registrados. Las tablas de la versión 1 se
 conservan para auditoría. Si solo hay eventos antiguos confirmados, la migración
 es automática y la siguiente captura completa establece el primer snapshot.
 
@@ -109,11 +117,16 @@ python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 stats
 python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 retry --scope SCOPE
 python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 retry --scope SCOPE --snapshot-id ID
 python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 force-next-snapshot --scope SCOPE
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 retry-review --scope SCOPE --snapshot-id ID
+python tools/delivery_state.py --db runtime/openvas/delivery.sqlite3 ack-review --scope SCOPE --snapshot-id ID
 ```
 
 Estos comandos no conectan a GMP ni al backend. retry adelanta la fecha de
 reintento, sin cambiar ID/payload ni saltarse FIFO. force-next-snapshot marca el
 checkpoint para volver a encolar la próxima captura completa con otro ID.
+stats muestra el motivo y el ID de los snapshots en revisión. Tras corregir el
+problema, retry-review autoriza un solo intento adicional con el mismo payload.
+Usa ack-review únicamente si verificaste que el receptor guardó el snapshot completo.
 BACKEND_ENABLED sigue controlando cualquier envío posterior.
 
 ## Artefactos y prueba controlada
@@ -166,8 +179,8 @@ sin repetidos ni faltantes, con el mismo snapshot_id, total y texto de llave
 duplicada esperado. No interpreta cualquier conflicto/error como entrega exitosa.
 La respuesta original success=false se conserva; se añade la marca local
 idempotent_replay_confirmed y el contador replayed_snapshots. Esto permite cerrar
-la cola si el receptor guardó todo y se perdió el primer ACK. Un resultado parcial,
-error distinto, snapshot ajeno o HTTP no 2xx permanece pendiente.
+la cola si el receptor guardó todo y se perdió el primer ACK. Un recibo parcial,
+incompleto o ajeno pasa a revisión.
 
 BACKEND_TIMEOUT pasa a 180 segundos: la inserción real tardó 35,373 segundos y
 superó el valor anterior de 30. BACKEND_CA_BUNDLE permite indicar un PEM de confianza
@@ -181,6 +194,5 @@ se basó en la conexión al endpoint interno autorizado, no en una CA pública.
 main.py --retry-pending procesa solo la cola existente y respeta los instantes
 elegibles/FIFO. El modo no llama enqueue, no toca el checkpoint de observación,
 no consulta GMP y no reconstruye el JSON ni su ID. Sin base retorna inactivo
-sin crear SQLite. Los errores quedan pendientes con backoff. El cron adicional
-comprueba cada minuto, independientemente de la recolección semanal; configuración
-y logs en [CRON.md](CRON.md). No hay reintentos de filas acked.
+sin crear SQLite. El cron adicional comprueba cada cinco minutos si hay un
+intento programado. La configuración y los logs están en [CRON.md](CRON.md).

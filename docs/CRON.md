@@ -46,10 +46,13 @@ Estado persistente: runtime/openvas/delivery.sqlite3, creado al ejecutar el emis
 Los archivos *_latest se sobrescriben; no se descargan copias a la laptop.
 
 Ambos launchers comparten el bloqueo runtime/openvas/weekly_validation.lock
-para impedir solapamiento (salida 75 si está ocupado), y usan umask 077.
+para impedir solapamiento, y usan umask 077. El semanal espera hasta 300 segundos.
+Registra el resultado final en cron.log y devuelve 75 si vence la espera.
 `scripts/run_weekly_validation.sh` conserva --no-backend como entrada manual
 sin envío; ya no es el comando del cron. Puede usarse para revisar la
 recolección sin enviar ni drenar pendientes aunque .env habilite el backend.
+El launcher semanal también acepta el argumento explícito --no-backend para
+probar la misma entrada sin enviar.
 
 La entrada original de Insight se conserva comentada en el crontab y hay
 respaldo privado del crontab y .env previos en el servidor. Para suspender
@@ -85,11 +88,12 @@ La revisión de los .env confirmó el mismo endpoint HTTPS para ambos emisores, 
 ## Reintentos automáticos de pendientes
 
 Se conserva intacta la entrada semanal de los domingos a las 09:00. Una entrada
-adicional del mismo usuario desarrollo-xoc despierta el emisor cada minuto:
+adicional del mismo usuario desarrollo-xoc revisa los pendientes cada cinco
+minutos (02, 07, …, 57), fuera del minuto 00 del proceso semanal.
 
 ```cron
 # BEGIN OPENVAS_MIFIBRA_PENDING_RETRIES
-* * * * * /bin/bash /home/desarrollo-xoc/DESARROLLO/openvas-insightvm/scripts/run_pending_retries.sh
+2-59/5 * * * * /bin/bash /home/desarrollo-xoc/DESARROLLO/openvas-insightvm/scripts/run_pending_retries.sh
 # END OPENVAS_MIFIBRA_PENDING_RETRIES
 ```
 
@@ -100,16 +104,18 @@ envía exactamente el ID y JSON almacenados. Sin base/pendientes no hace POST.
 BACKEND_ENABLED=false o --no-backend también deshabilitan estos reintentos.
 
 Se respeta FIFO y next_attempt: backoff de 60 segundos hasta 3600 segundos por
-defecto, con resolución adicional del cron de hasta un minuto. Se conserva la
+defecto, con resolución adicional del cron de hasta cinco minutos. Se conserva la
 misma validación estricta de duplicados. Un reintento antiguo no adelanta a otro.
 Comparte el bloqueo con el proceso semanal y el launcher de validación; si el
-bloqueo está ocupado, termina sin error y vuelve a comprobar al minuto siguiente.
+bloqueo está ocupado, termina sin error y vuelve a comprobar en el siguiente turno.
+Los fallos transitorios permiten hasta dos reintentos por lote. Un rechazo
+definitivo, un recibo parcial o el agotamiento de intentos requieren revisión.
 No utiliza --once: --retry-pending ya ejecuta una sola pasada de la cola y sale.
 
 Logs adicionales: cloud_audit_log/retry.log (stdout/stderr del cron) y
 logs/retry.log (rotativo, hasta 5 respaldos de 2 MB). Las corridas sin intentos
 ni errores no generan mensajes ni actualizan metadata; no se crea historial
-JSON por minuto. Los intentos/errores actualizan solo
+JSON por ejecución. Los intentos/errores actualizan solo
 runtime/openvas/artifacts/retry_latest.meta.json. La metadata semanal
 run_latest.meta.json no se sobrescribe por reintentos. La SQLite muestra el
 estado final autoritativo: una entrega semanal inicialmente fallida puede
